@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Engine Check</title>
+<style>
+  :root { --bg: #fff; --fg: #111; --ok: #0a7a36; --bad: #b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --ok: #5bd48a; --bad: #ff8a80; } }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.5 ui-monospace, monospace; margin: 16px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  canvas { max-width: 100%; margin-top: 8px; }
+</style>
+</head>
+<body>
+<h1>Engine check vs PyTorch reference</h1>
+<p>Runs each component on the reference inputs from <code>tools/reference.py --dump</code> and compares.
+Query: <code>?dump=../out/dump_int8/&amp;only=te,ctx,dit,full,vae</code> (the model and precisions come from the dump).</p>
+<pre id="log"></pre>
+<canvas id="c"></canvas>
+<script type="module" src="check.js"></script>
+</body>
+</html>

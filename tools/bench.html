@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GEMM Bench</title>
+<style>
+  :root { --bg: #fff; --fg: #111; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; } }
+  body { background: var(--bg); color: var(--fg); font: 13px/1.5 ui-monospace, monospace; margin: 16px; }
+</style>
+</head>
+<body>
+<h1>GEMM microbenchmark</h1>
+<p>M = N = K = <span id="n"></span> (<code>?n=4096</code>); GPU time per call from timestamp queries.</p>
+<pre id="log"></pre>
+<script type="module">
+import { GPU } from "../app/gpu/device.js";
+import * as ops from "../app/gpu/ops.js";
+
+const n = +(new URLSearchParams(location.search).get("n") || 4096);
+document.getElementById("n").textContent = n;
+const log = (s) => { document.getElementById("log").textContent += s + "\n"; };
+window.__bench = null;
+try {
+  const gpu = await GPU.create({ profile: true });
+  const rnd = (len) => new Float32Array(len).map(() => Math.random() - 0.5);
+  const x = gpu.fromArray(rnd(n * n), [n, n]);
+  const weights = {
+    f32: { kind: "f32", N: n, K: n, buf: gpu.upload(rnd(n * n)) },
+    bf16: { kind: "bf16", N: n, K: n, buf: gpu.upload(new Uint16Array(n * n).map(() => 0x3f00 + ((Math.random() * 255) | 0))) },
+    i8: { kind: "i8", N: n, K: n, buf: gpu.upload(new Int8Array(n * n).map(() => ((Math.random() * 255) | 0) - 127)), scale: gpu.upload(new Float32Array(n).fill(0.01)) },
+    w4: {
+      kind: "w4", N: n, K: n, buf: gpu.upload(new Uint32Array((n * n) / 8).map(() => (Math.random() * 2 ** 32) >>> 0)),
+      srel: gpu.upload(new Uint8Array(n * n / 16).fill(0x38)), scale: gpu.upload(new Float32Array(n).fill(0.01)),
+      codebook: gpu.upload(new Float32Array(16).map((_, i) => (i - 7.5) / 8)),
+    },
+  };
+  for (const [name, W] of Object.entries(weights)) {
+    for (let r = 0; r < 4; r++) { const y = ops.linear(gpu, x, W, { xr: x, name: name + (r ? "" : ".warm") }); y.release(); }
+  }
+  await gpu.sync();
+  const rep = (await gpu.profiler.report()).filter((r) => !r.name.endsWith("warm"));
+  window.__bench = rep.map((r) => ({ name: r.name, ms: r.ms / r.count, tflops: r.flops / (r.ms / 1000) / 1e12 }));
+  for (const r of window.__bench) log(`${r.name.padEnd(6)} ${r.ms.toFixed(1).padStart(7)} ms  ${r.tflops.toFixed(2)} TFLOP/s`);
+} catch (e) {
+  log("ERROR " + (e.stack || e));
+  window.__bench = { error: String(e.stack || e) };
+}
+</script>
+</body>
+</html>

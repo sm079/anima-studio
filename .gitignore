@@ -1,0 +1,4 @@
+# built web assets (tools/build_assets.py), reference dumps and other tool output
+/models/
+/out/
+__pycache__/

@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anima Studio</title>
+<meta name="description" content="Create anime illustrations with the Anima model, running entirely in your browser.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23e8577e'/%3E%3Cpath d='M9 23 16 8l7 15M11.5 18h9' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app/style.css">
+</head>
+<body>
+<div class="app">
+  <header class="bar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">A</span>
+      <span class="name">Anima <b>Studio</b></span>
+    </div>
+    <div class="status" id="status" role="status" aria-live="polite">
+      <span class="dot" id="statusDot"></span><span id="statusText">Starting…</span>
+    </div>
+    <div class="bar-right">
+      <button class="chip" id="gpuChip" type="button" hidden aria-label="Model version, opens settings"></button>
+      <button class="icon-btn" id="settingsBtn" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <aside class="rail" aria-label="Image settings">
+    <!-- ============ main view ============ -->
+    <div class="view" id="mainView">
+      <!-- prompt: takes all remaining height -->
+      <section class="group grow">
+        <div class="label-row">
+          <label for="prompt" class="label">Describe your image</label>
+          <span class="head-actions">
+            <button class="pill" id="boostBtn" type="button" aria-pressed="true" title="Adds the quality tags this model was trained to respond to">✦ Boost</button>
+            <button class="link" id="exampleBtn" type="button">Example</button>
+          </span>
+        </div>
+        <textarea id="prompt" spellcheck="false" placeholder="e.g. 1girl, silver hair, school uniform, cherry blossoms, smile"></textarea>
+      </section>
+
+      <!-- LoRAs: one compact row; the list lives in its own view -->
+      <button class="lora-entry" id="loraEntry" type="button" aria-label="LoRAs, open the list">
+        <span class="label">LoRAs</span>
+        <span class="stack" id="loraStack"></span>
+        <span class="lora-sum" id="loraSum"></span>
+        <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+
+      <!-- canvas: presets left, sliders right -->
+      <section class="group">
+        <div class="label-row"><span class="label">Canvas</span><span class="hint" id="sizeHint"></span></div>
+        <div class="canvas-grid">
+          <div class="shapes" id="shapes" role="radiogroup" aria-label="Aspect ratio"></div>
+          <label class="slider"><span>W</span><input type="range" id="wRange" min="256" max="1536" step="16" aria-label="Width"><output id="wOut"></output></label>
+          <div class="seg" id="sizes" role="radiogroup" aria-label="Size"></div>
+          <label class="slider"><span>H</span><input type="range" id="hRange" min="256" max="1536" step="16" aria-label="Height"><output id="hOut"></output></label>
+        </div>
+      </section>
+
+      <!-- sampling -->
+      <section class="group">
+        <span class="label">Sampling</span>
+        <div class="pair">
+          <div class="seg" id="detail" role="radiogroup" aria-label="Detail"></div>
+          <div class="seg" id="style" role="radiogroup" aria-label="Style"></div>
+        </div>
+        <div class="chips" id="advChips" aria-label="Sampling details"></div>
+      </section>
+
+      <!-- seed -->
+      <section class="group">
+        <div class="label-row">
+          <label class="label" for="seed">Seed</label>
+          <button class="pill" id="randomBtn" type="button" aria-pressed="true" title="Pick a new random seed for every image">⤨ New each time</button>
+        </div>
+        <div class="seed-row">
+          <input id="seed" inputmode="numeric" autocomplete="off">
+          <button class="icon-btn soft" id="rollBtn" type="button" title="Roll a new seed (and keep it)" aria-label="Roll a new seed">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4"/><circle cx="8.5" cy="8.5" r="1.3" class="fill"/><circle cx="15.5" cy="15.5" r="1.3" class="fill"/><circle cx="15.5" cy="8.5" r="1.3" class="fill"/><circle cx="8.5" cy="15.5" r="1.3" class="fill"/><circle cx="12" cy="12" r="1.3" class="fill"/></svg>
+          </button>
+        </div>
+      </section>
+
+      <div class="go-row">
+        <button class="primary" id="goBtn" disabled><span id="goLabel">Generate</span><span class="go-sub" id="estimate"></span></button>
+        <select class="batch" id="batch" aria-label="How many images" title="How many images to queue">
+          <option value="1">×1</option><option value="2">×2</option><option value="4">×4</option><option value="8">×8</option>
+        </select>
+        <button class="icon-btn stop" id="stopBtn" type="button" hidden title="Stop and clear the queue" aria-label="Stop and clear the queue">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" class="fill"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- ============ LoRA view ============ -->
+    <div class="view" id="loraView" hidden>
+      <div class="view-head">
+        <button class="icon-btn" id="loraBack" type="button" aria-label="Back" title="Back">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <h2>LoRAs</h2>
+        <span class="hint" id="loraCount"></span>
+      </div>
+      <p class="help">Add styles, characters or concepts made for <b>Anima</b>. Paste the link to a <b>.safetensors</b> file on Hugging Face (<a href="https://huggingface.co/models?other=base_model:adapter:circlestone-labs/Anima" target="_blank" rel="noopener">browse Anima LoRAs ↗</a>):</p>
+      <div class="url-row">
+        <input id="loraUrl" type="url" placeholder="https://huggingface.co/…/lora.safetensors" autocomplete="off" spellcheck="false">
+        <button class="ghost" type="button" id="loraLookup">Look up</button>
+      </div>
+      <div class="lora-card" id="loraCard" hidden></div>
+      <p class="help" id="loraStatus"></p>
+      <div class="loras" id="loraList"></div>
+      <div class="view-foot">
+        <label class="link small-link">+ Add a file from your computer<input type="file" id="loraLocalInput" accept=".safetensors" hidden></label>
+        <button class="link small-link" id="loraAllOff" type="button">Turn all off</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="stage" aria-label="Result">
+    <div class="canvas-box" id="canvasBox">
+      <canvas id="canvas" width="1024" height="1024" hidden></canvas>
+
+      <div class="panel-center" id="welcome" hidden>
+        <h1>Make anime art on your own device</h1>
+        <p class="lead">Anima runs entirely in this browser. Your prompts and images never leave your computer. Pick a download to get started. It's saved, so you only download it once.</p>
+        <div class="presets" id="welcomePresets"></div>
+        <div class="welcome-token">
+          <label class="label" for="welcomeToken">Hugging Face token <em>optional</em></label>
+          <div class="url-row">
+            <input id="welcomeToken" type="password" autocomplete="off" spellcheck="false" placeholder="hf_…">
+            <a class="ghost" href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">Get one ↗</a>
+          </div>
+          <p class="help" id="welcomeTokenStatus"></p>
+        </div>
+        <button class="primary wide" id="welcomeGo">Download &amp; start</button>
+        <p class="help center" id="welcomeNote"></p>
+      </div>
+
+      <div class="panel-center" id="loading" hidden>
+        <div class="spinner" aria-hidden="true"></div>
+        <h2 id="loadingTitle">Getting ready…</h2>
+        <div class="bar-progress"><div id="loadingBar"></div></div>
+        <p class="help center" id="loadingText"></p>
+        <button class="ghost" id="loadingCancel" hidden>Cancel download</button>
+      </div>
+
+      <div class="panel-center" id="empty" hidden>
+        <div class="empty-art" aria-hidden="true">
+          <svg viewBox="0 0 132 104">
+            <rect class="frame" x="10" y="14" width="100" height="78" rx="12"/>
+            <path class="hill" d="M18 84l24-26 16 15 14-12 30 23z"/>
+            <circle class="hill" cx="78" cy="38" r="8"/>
+            <path class="spark" d="M112 10v14M105 17h14M122 34v8M118 38h8M24 4v8M20 8h8"/>
+          </svg>
+        </div>
+        <h2>Ready when you are</h2>
+        <p class="lead">Describe an image on the left and press <b>Generate</b>.</p>
+      </div>
+
+      <div class="progress-card" id="progress" hidden>
+        <div class="bar-progress"><div id="progressBar"></div></div>
+        <span id="progressText"></span>
+      </div>
+
+      <div class="error-card" id="errorCard" hidden></div>
+
+      <!-- every image from this session, covering the viewer -->
+      <div class="gallery" id="gallery" hidden>
+        <div class="gallery-head">
+          <span class="label" id="galleryTitle">This session</span>
+          <span class="help">Images are kept until you close the tab. Save the ones you want.</span>
+          <button class="icon-btn soft" id="galleryClose" type="button" title="Back to the image (Esc)" aria-label="Close">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <div class="gallery-grid" id="galleryGrid"></div>
+      </div>
+    </div>
+
+    <div class="stage-foot" id="stageFoot" hidden>
+      <div class="info" id="info"></div>
+      <div class="strip-row">
+        <div class="strip" id="strip" aria-label="This session's images"></div>
+        <button class="all-btn" id="allBtn" type="button" title="Show all images">
+          <svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>
+          <span id="allCount">All</span>
+        </button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- inline editor for one sampling detail -->
+<div class="popover" id="advPop" hidden role="dialog" aria-label="Edit sampling detail"></div>
+
+<!-- settings -->
+<dialog id="settings" aria-labelledby="settingsTitle">
+  <form method="dialog" class="dialog">
+    <div class="dialog-head">
+      <h2 id="settingsTitle">Settings</h2>
+      <button class="icon-btn" value="close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    <label class="field" id="versionField" hidden>
+      <span class="label">Model version</span>
+      <select id="version"></select>
+    </label>
+    <span class="label">Download size &amp; quality</span>
+    <div class="presets" id="presets"></div>
+    <details class="advanced">
+      <summary>Advanced: choose each part separately</summary>
+      <div class="adv-grid">
+        <label class="field"><span class="label">Image model</span><select id="ditSel"></select></label>
+        <label class="field"><span class="label">Text understanding</span><select id="teSel"></select></label>
+      </div>
+      <p class="help">Smaller versions use compressed weights: a smaller download and less graphics memory, at about the same speed.</p>
+    </details>
+    <div class="field">
+      <span class="label">Hugging Face token <em class="muted">optional</em></span>
+      <div class="url-row">
+        <input id="hfToken" type="password" autocomplete="off" spellcheck="false" placeholder="hf_…">
+        <button class="ghost" type="button" id="keyToggle">Show</button>
+      </div>
+      <p class="help">Used for model downloads (signed-in downloads get higher limits) and for LoRAs you have to sign in or accept terms for. Create a <b>read</b> token under <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">Hugging Face settings → Access Tokens</a>. It's stored only in this browser and sent only to Hugging Face.</p>
+    </div>
+    <div class="storage">
+      <div><span class="label">Saved in this browser</span><p class="help" id="storageText"></p></div>
+      <div class="storage-actions">
+        <button class="ghost" type="button" id="clearLorasBtn">Remove LoRAs</button>
+        <button class="ghost danger" type="button" id="clearBtn">Remove model</button>
+      </div>
+    </div>
+    <p class="help">Model: <a href="https://huggingface.co/circlestone-labs/Anima" target="_blank" rel="noopener">Anima by CircleStone Labs</a> (non-commercial license; generated images may be used commercially).</p>
+  </form>
+</dialog>
+
+<div class="fatal" id="fatal" hidden></div>
+<script type="module" src="app/main.js"></script>
+</body>
+</html>

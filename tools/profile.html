@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Engine Profile</title>
+<style>
+  :root { --bg: #fff; --fg: #111; --muted: #666; --line: #ddd; --bar: #d9416b; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --muted: #999; --line: #333; --bar: #f06a90; } }
+  body { background: var(--bg); color: var(--fg); font: 13px/1.5 ui-monospace, monospace; margin: 16px; }
+  table { border-collapse: collapse; margin: 8px 0 24px; }
+  td, th { padding: 2px 10px; border-bottom: 1px solid var(--line); text-align: right; }
+  td:first-child, th:first-child { text-align: left; }
+  .bar { display: inline-block; height: 8px; background: var(--bar); vertical-align: middle; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Engine profile</h1>
+<p class="muted">Per-kernel GPU time from timestamp queries (one timed pass per dispatch).
+Query: <code>?size=1024&amp;dit=int8&amp;te=int8&amp;vae=1</code></p>
+<pre id="log"></pre>
+<div id="out"></div>
+<script type="module" src="profile.js"></script>
+</body>
+</html>
