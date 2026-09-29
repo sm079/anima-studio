@@ -24,6 +24,11 @@ export function ropeTable(gpu, L, D, theta) {
 // Cosmos VideoRopePosition3DEmb for a single frame: 64 slots = 22 temporal (position 0),
 // 21 height, 21 width, with NTK-scaled theta (extrapolation ratio 4 for h/w).
 export function ditRopeTable(gpu, H, W) {
+  return table(gpu, ditRopeAngles(H, W), H * W, 64);
+}
+
+// Angles [H*W][64] of ditRopeTable (also used by the WebNN backend).
+export function ditRopeAngles(H, W) {
   const headDim = 128;
   const dimH = Math.floor(headDim / 6) * 2; // 42
   const dimT = headDim - 2 * dimH; // 44
@@ -43,5 +48,5 @@ export function ditRopeTable(gpu, H, W) {
       }
     }
   }
-  return table(gpu, a, L, half);
+  return a;
 }

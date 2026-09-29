@@ -53,7 +53,7 @@ export function linearRegistry(root) {
     if (typeof GPUBuffer !== "undefined" && o instanceof GPUBuffer) return;
     if (o instanceof SafeTensors) return;
     seen.add(o);
-    if (o.kind && o.buf && o.N && o.K) {
+    if (o.kind && (o.buf || o.webnn) && o.N && o.K) {
       if (o.parts) for (const p of o.parts) reg.set(norm(p.name), { W: o, off: p.off, n: p.n });
       else if (o.name) reg.set(norm(o.name), { W: o, off: 0, n: o.N });
       return;
@@ -64,7 +64,7 @@ export function linearRegistry(root) {
   return reg;
 }
 
-function hadamardRows(data, rows, K) {
+export function hadamardRows(data, rows, K) {
   for (let r = 0; r < rows; r++) {
     for (let g = 0; g < K; g += 256) {
       const base = r * K + g;
@@ -125,13 +125,16 @@ export async function loadLora(gpu, blob, regs) {
     if (needsRotation(target.W)) hadamardRows(Adata, r, target.W.K);
     const B = await st.f32(keys.B);
     const alpha = keys.alpha ? (await st.f32(keys.alpha))[0] : null;
-    modules.push({ target, A: gpu.upload(Adata), B: gpu.upload(new Float32Array(B)), r, alphaScale: alpha ? alpha / r : 1 });
+    const Bdata = new Float32Array(B);
+    // layers run by the WebNN backend take the CPU copies (baked into its graph), not GPU buffers
+    const nn = !!target.W.webnn;
+    modules.push({ target, A: nn ? null : gpu.upload(Adata), B: nn ? null : gpu.upload(Bdata), Adata: nn ? Adata : null, Bdata: nn ? Bdata : null, r, alphaScale: alpha ? alpha / r : 1 });
   }
   return { modules, matched: modules.length, total: groups.size, unsupported, skipped };
 }
 
 export function destroyLora(L) {
-  for (const m of L.modules) { m.A.destroy(); m.B.destroy(); }
+  for (const m of L.modules) { m.A?.destroy(); m.B?.destroy(); }
 }
 
 // Replace every LoRA side path in the registries with the given [{ lora, strength }].
@@ -140,7 +143,7 @@ export function attachLoras(regs, active) {
   for (const { lora, strength } of active) {
     if (!strength) continue;
     for (const m of lora.modules) {
-      m.target.W.lora.push({ A: m.A, B: m.B, r: m.r, scale: strength * m.alphaScale, off: m.target.off, n: m.target.n });
+      m.target.W.lora.push({ A: m.A, B: m.B, Adata: m.Adata, Bdata: m.Bdata, module: m, r: m.r, scale: strength * m.alphaScale, off: m.target.off, n: m.target.n });
     }
   }
 }

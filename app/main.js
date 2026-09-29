@@ -3,6 +3,7 @@ import { createEngine } from "./engine.js";
 import { listCached, clearCache, saveLoraFile, removeLoraFile, loraStorageBytes, clearLoras } from "./store.js";
 import { parseHfUrl, fetchLoraInfo, openDownload, checkToken } from "./hf.js";
 import { SafeTensors } from "./weights.js";
+import { hasWebNN, probeWebNN, WEBNN_FLAG } from "./webnn/support.js";
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -85,6 +86,8 @@ let loras = store.get("loras", []); // { id, name, version, image, page, words, 
 let manifest = null;
 let pipe = null;
 let sel = store.get("selection", null); // { model, dit, te }
+// Engine for the image model: "webgpu" (default) or "webnn" (optional, experimental; ?backend=webnn)
+let backend = params.get("backend") || store.get("backend", "webgpu");
 let phase = "starting"; // starting | welcome | loading | ready | generating (queue running)
 let loadAbort = null;
 let exampleIdx = 0;
@@ -150,6 +153,7 @@ function friendlyError(e) {
   if (/device lost|out of memory|OOM|allocation/i.test(m)) return "Your graphics card ran out of memory. Try a smaller canvas, fewer LoRAs, or the Compact download in settings.";
   if (/HTTP|fetch|network|Failed to fetch/i.test(m)) return "The download was interrupted. Check your connection and try again.";
   if (/quota|storage|space/i.test(m)) return "Not enough storage space in this browser.";
+  if (backend === "webnn") return `WebNN error: ${m}. The WebNN engine is experimental: switch back to WebGPU in settings if this keeps happening.`;
   return "Something went wrong: " + m;
 }
 
@@ -676,7 +680,7 @@ function renderPresets(el, cached, onPick) {
 
 function chipText() {
   const p = currentPreset();
-  $("gpuChip").textContent = p ? p.label : "Custom";
+  $("gpuChip").textContent = (p ? p.label : "Custom") + (backend === "webnn" ? " · WebNN" : "");
   $("gpuChip").hidden = false;
 }
 
@@ -684,7 +688,7 @@ function chipText() {
 
 async function ensureModel() {
   const { files } = resolveFiles(manifest, sel);
-  if (pipe.isLoaded(files)) { toReady(); return; }
+  if (pipe.isLoaded(files, backend)) { toReady(); return; }
   const cached = await cachedMap();
   const allSaved = ["dit", "te", "vae"].every((k) => cached.get(files[k].path) === files[k].size);
   if (allSaved) return loadModel();
@@ -748,7 +752,7 @@ async function loadModel() {
   appliedKey = null;
   const meter = rateMeter();
   try {
-    await pipe.load(BASE, manifest, sel, {
+    await pipe.load(BASE, manifest, { ...sel, backend }, {
       token: store.get("hfToken", ""),
       signal: loadAbort.signal,
       onStatus: (s) => {
@@ -776,6 +780,12 @@ async function loadModel() {
     phase = "welcome";
     if (e.name === "AbortError") { ensureModel(); return; }
     console.error(e);
+    if (backend === "webnn") {
+      // the experimental engine couldn't take this model: fall back instead of leaving the app stuck
+      showError(`WebNN couldn't load the model (${e.message}). Switched back to the WebGPU engine.`);
+      setBackend("webgpu");
+      return;
+    }
     setStatus("Couldn't load the model", "err");
     showWelcome(await cachedMap());
     showError(friendlyError(e));
@@ -922,6 +932,8 @@ async function runJob(job) {
           job.frac = p.frac * 0.92;
           $("progressBar").style.width = `${job.frac * 100}%`;
           $("progressText").textContent = `Step ${p.step + 1} of ${p.steps}${left}${queued()}`;
+        } else if (p.phase === "compile") {
+          $("progressText").textContent = `Building the WebNN graph for this size (first image only) ${Math.round(p.frac * 100)}%…${queued()}`;
         } else if (p.phase === "decode") {
           job.frac = 0.92 + p.frac * 0.08;
           $("progressBar").style.width = `${job.frac * 100}%`;
@@ -931,7 +943,7 @@ async function runJob(job) {
       },
     });
     if (live) draw(res.image);
-    if (!backgrounded && !job.loras.length) {
+    if (!backgrounded && !job.loras.length && backend === "webgpu") {
       const runs = store.get("speed", []).filter((r) => r.px !== width * height);
       runs.push({ px: width * height, step: res.timings.perStep, decode: res.timings.decode + res.timings.encode });
       store.set("speed", runs.slice(-6));
@@ -1177,9 +1189,41 @@ async function openSettings(focusKey = false) {
   const busy = phase === "generating" || phase === "loading";
   $("clearBtn").disabled = !modelBytes || busy;
   $("clearLorasBtn").disabled = !loraBytes || busy;
-  for (const el of [$("version"), $("ditSel"), $("teSel"), ...$("presets").querySelectorAll("button")]) el.disabled = busy;
+  for (const el of [$("version"), $("ditSel"), $("teSel"), $("backendSel"), ...$("presets").querySelectorAll("button")]) el.disabled = busy;
+  renderBackend();
   $("settings").showModal();
   if (focusKey) $("hfToken").focus();
+}
+
+// ------------------------------------------------------------------ optional WebNN engine
+
+let webnnProbe = null;
+async function renderBackend() {
+  const sel_ = $("backendSel");
+  sel_.value = backend;
+  const help = $("backendHelp");
+  const opt = sel_.querySelector('option[value="webnn"]');
+  if (!hasWebNN()) {
+    opt.disabled = true;
+    help.innerHTML = `WebNN is the browser's built-in machine-learning API. It can run the image model on your
+      graphics card's AI (tensor) cores, which is often faster. It's turned off in this browser. To try it in
+      Chrome or Edge:<br>1. Open <code>${WEBNN_FLAG}</code> (Edge: <code>${WEBNN_FLAG.replace("chrome", "edge")}</code>) in a new tab.<br>
+      2. Set <b>WebNN API</b> to <b>Enabled</b>.<br>3. Relaunch the browser and come back here.`;
+    return;
+  }
+  help.textContent = "Checking WebNN…";
+  const r = await (webnnProbe ||= probeWebNN());
+  opt.disabled = !r.ok && backend !== "webnn";
+  help.textContent = r.ok
+    ? `Experimental. Runs the image model through WebNN${r.float16 ? " in half precision" : ""}, which can use your graphics card's AI cores. The text encoder and image decoder stay on WebGPU. The first image at each size takes longer while WebNN builds its graph. Images can differ slightly from the WebGPU engine. If it's slower on your device or something breaks, switch back.`
+    : `WebNN is enabled but couldn't start (${r.reason}). Update your browser or graphics driver, or keep using WebGPU.`;
+}
+
+function setBackend(v) {
+  backend = v === "webnn" ? "webnn" : "webgpu";
+  store.set("backend", backend);
+  chipText();
+  ensureModel();
 }
 
 function changeSelection(patch) {
@@ -1207,6 +1251,7 @@ async function init() {
     return;
   }
   normalizeSelection();
+  if (backend !== "webgpu" && (backend !== "webnn" || !hasWebNN())) backend = "webgpu"; // flag turned off since
 
   // prompt
   $("prompt").value = store.get("prompt", EXAMPLES[0]);
@@ -1283,6 +1328,11 @@ async function init() {
   $("version").onchange = () => { $("settings").close(); changeSelection({ model: $("version").value }); };
   $("ditSel").onchange = () => { $("settings").close(); changeSelection({ dit: $("ditSel").value }); };
   $("teSel").onchange = () => { $("settings").close(); changeSelection({ te: $("teSel").value }); };
+  $("backendSel").onchange = () => {
+    if (phase === "generating" || phase === "loading") return;
+    $("settings").close();
+    setBackend($("backendSel").value);
+  };
   $("hfToken").oninput = () => setToken($("hfToken").value);
   $("welcomeToken").oninput = () => setToken($("welcomeToken").value);
   $("keyToggle").onclick = () => {

@@ -44,8 +44,8 @@ class WorkerEngine {
     });
   }
 
-  isLoaded(files) {
-    return ["dit", "te", "vae"].every((k) => this.loaded[k] === files[k].path);
+  isLoaded(files, backend = "webgpu") {
+    return ["dit", "te", "vae"].every((k) => this.loaded[k] === (k === "dit" && backend === "webnn" ? files.dit.path + "#webnn" : files[k].path));
   }
 
   get model() {
@@ -82,7 +82,7 @@ class LocalEngine {
   constructor() {
     this.pipe = new AnimaPipeline();
   }
-  isLoaded(files) { return this.pipe.isLoaded(files); }
+  isLoaded(files, backend) { return this.pipe.isLoaded(files, backend); }
   get model() { return this.pipe.model; }
   get selection() { return this.pipe.selection; }
   get loaded() { return this.pipe.loaded; }
