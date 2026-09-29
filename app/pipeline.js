@@ -112,7 +112,7 @@ export class AnimaPipeline {
         // WebGPU keeps only the LLM adapter; WebNN runs the denoising steps
         const st = await SafeTensors.open(files.dit, "model.diffusion_model.");
         this.dit = await AnimaDiT.load(gpu, st, null, { adapterOnly: true });
-        this.nn = await WebNNDiT.load(st, { onProgress: progress });
+        this.nn = await WebNNDiT.load(st, { onProgress: progress, precision: selection.precision });
       } else if (k === "dit") this.dit = await AnimaDiT.load(gpu, await SafeTensors.open(files.dit, "model.diffusion_model."), progress);
       if (k === "vae") this.vae = await VAEDecoder.load(gpu, await SafeTensors.open(files.vae));
       this.loaded[k] = loadedKey(want, k, backend);

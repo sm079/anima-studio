@@ -39,8 +39,8 @@ function compare(name, got, ref, tol) {
 try {
   const meta = await (await fetch(new URL("index.json", dumpDir))).json();
   const manifest = await fetchManifest(base);
-  const selection = { model: q.get("model") || meta.model || "turbo-v1.1", dit: q.get("dit") || meta.dit || "int8", te: q.get("te") || meta.te || "int8" };
-  log(`selection ${selection.model} dit ${selection.dit} te ${selection.te}`);
+  const selection = { model: q.get("model") || meta.model || "turbo-v1.1", dit: q.get("dit") || meta.dit || "int8", te: q.get("te") || meta.te || "int8", backend: q.get("backend") || "webgpu", precision: q.get("precision") || undefined };
+  log(`selection ${selection.model} dit ${selection.dit} te ${selection.te} backend ${selection.backend}`);
   const pipe = new AnimaPipeline();
   let lastPct = -1;
   await pipe.load(base, manifest, selection, {
@@ -75,7 +75,22 @@ try {
   if (only.includes("ctx")) compare("ctx", await gpu.read(ctx), await loadDump("ctx"), 2e-3);
 
   const h = meta.height / 8, w = meta.width / 8;
-  if (only.includes("dit")) {
+  if (only.includes("dit") && pipe.nn) {
+    // WebNN backend (?backend=webnn): same step from the reference context; fp16 math, so a
+    // looser tolerance than the fp32 WebGPU engine
+    const nn = pipe.nn;
+    log(`webnn: compute ${nn.ct}, int8 weights ${nn.caps.int8 ? "in graph" : "expanded"}, constant tensors ${nn.linears()[0].tensors ? "yes" : "no"}`);
+    const cond = { ctx: await loadDump("ctx"), Lk: 512 };
+    const noise = await loadDump("noise");
+    const sigma = simpleSigmas(meta.steps, 3)[0];
+    const x = noise.map((v) => v * sigma);
+    for (let rep = 0; rep < 3; rep++) {
+      t = performance.now();
+      const v = await nn.forward(x, h, w, cond, sigma, rep === 0 ? (f) => { if (f === 1) log(`graph built in ${(performance.now() - t).toFixed(0)} ms`); } : null);
+      log(`webnn dit forward ${meta.width}x${meta.height}: ${(performance.now() - t).toFixed(0)} ms${rep === 0 ? " (includes graph build + compile)" : ""}`);
+      if (rep === 0) compare("denoised0", x.map((xi, i) => xi - sigma * v[i]), await loadDump("denoised0"), Number(q.get("tol")) || (nn.ct === "float16" ? 3e-2 : 5e-3));
+    }
+  } else if (only.includes("dit")) {
     const refCond = pipe.dit.prepareContext(gpu.fromArray(await loadDump("ctx"), [512, 1024]));
     const noise = await loadDump("noise");
     const sigma = simpleSigmas(meta.steps, 3)[0];
