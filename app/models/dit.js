@@ -37,8 +37,49 @@ function normFor(gpu, x, mod, Ws) {
   return { n, xr: rotated ? n : undefined };
 }
 
+// Sinusoidal timestep embedding [D] (cos half, then sin half), as the DiT's t_embedder.0.
+export function timestepEmbedding(sigma) {
+  const half = D / 2;
+  const temb = new Float32Array(D);
+  for (let i = 0; i < half; i++) {
+    const f = Math.fround(Math.exp(Math.fround((-Math.log(10000) * i) / half)));
+    const a = Math.fround(sigma * f);
+    temb[i] = Math.cos(a);
+    temb[half + i] = Math.sin(a);
+  }
+  return temb;
+}
+
+// latent [16, h, w] -> patches [(h/2)(w/2), 68]: "c (h m) (w n) -> (h w) (c m n)" with the zero
+// padding-mask channel as c = 16
+export function patchify(latent, h, w) {
+  const Hp = h / 2, Wp = w / 2;
+  const patches = new Float32Array(Hp * Wp * 68);
+  for (let y = 0; y < Hp; y++) for (let x = 0; x < Wp; x++) {
+    const o = (y * Wp + x) * 68;
+    for (let c = 0; c < 16; c++) for (let m = 0; m < 2; m++) for (let n = 0; n < 2; n++) {
+      patches[o + c * 4 + m * 2 + n] = latent[c * h * w + (2 * y + m) * w + (2 * x + n)];
+    }
+  }
+  return patches;
+}
+
+// final layer output [(h/2)(w/2), 64] -> [16, h, w]: "(h w) (p1 p2 c) -> c (h p1) (w p2)"
+export function unpatchify(o, h, w) {
+  const Hp = h / 2, Wp = w / 2;
+  const v = new Float32Array(16 * h * w);
+  for (let y = 0; y < Hp; y++) for (let xx = 0; xx < Wp; xx++) {
+    const base = (y * Wp + xx) * 64;
+    for (let p1 = 0; p1 < 2; p1++) for (let p2 = 0; p2 < 2; p2++) for (let c = 0; c < 16; c++) {
+      v[c * h * w + (2 * y + p1) * w + (2 * xx + p2)] = o[base + p1 * 32 + p2 * 16 + c];
+    }
+  }
+  return v;
+}
+
 export class AnimaDiT {
-  static async load(gpu, st, onProgress) {
+  // adapterOnly: load just the LLM adapter (the WebNN backend runs the rest, see webnn/dit.js)
+  static async load(gpu, st, onProgress, { adapterOnly = false } = {}) {
     const m = new AnimaDiT(gpu, st);
     // LLM adapter
     const A = { blocks: [] };
@@ -57,6 +98,7 @@ export class AnimaDiT {
     A.outProj = await st.linear(gpu, "llm_adapter.out_proj.");
     A.norm = await st.vector(gpu, "llm_adapter.norm.weight");
     m.adapter = A;
+    if (adapterOnly) return m;
 
     m.xEmbed = await st.linear(gpu, "x_embedder.proj.1.");
     m.t1 = await st.linear(gpu, "t_embedder.1.linear_1.");
@@ -153,15 +195,7 @@ export class AnimaDiT {
   // Everything that depends only on sigma.
   timeCond(sigma) {
     const gpu = this.gpu;
-    const half = D / 2;
-    const temb = new Float32Array(D);
-    for (let i = 0; i < half; i++) {
-      const f = Math.fround(Math.exp(Math.fround((-Math.log(10000) * i) / half)));
-      const a = Math.fround(sigma * f);
-      temb[i] = Math.cos(a);
-      temb[half + i] = Math.sin(a);
-    }
-    const t = gpu.fromArray(temb, [1, D]);
+    const t = gpu.fromArray(timestepEmbedding(sigma), [1, D]);
     const h = ops.linear(gpu, t, this.t1, { act: "silu" });
     const lora = ops.linear(gpu, h, this.t2); // adaln_lora [1, 6144]
     h.release();
@@ -219,15 +253,7 @@ export class AnimaDiT {
   async forward(latent, h, w, cond, tc, onBlock) {
     const gpu = this.gpu;
     const Hp = h / 2, Wp = w / 2, L = Hp * Wp;
-    // patchify "c (h m) (w n) -> (h w) (c m n)" with the zero padding-mask channel as c = 16
-    const patches = new Float32Array(L * 68);
-    for (let y = 0; y < Hp; y++) for (let x = 0; x < Wp; x++) {
-      const o = (y * Wp + x) * 68;
-      for (let c = 0; c < 16; c++) for (let m = 0; m < 2; m++) for (let n = 0; n < 2; n++) {
-        patches[o + c * 4 + m * 2 + n] = latent[c * h * w + (2 * y + m) * w + (2 * x + n)];
-      }
-    }
-    const xin = gpu.fromArray(patches, [L, 68]);
+    const xin = gpu.fromArray(patchify(latent, h, w), [L, 68]);
     const x = ops.linear(gpu, xin, this.xEmbed);
     xin.release();
     const cs = ditRopeTable(gpu, Hp, Wp);
@@ -295,14 +321,6 @@ export class AnimaDiT {
     n.release();
     const o = await gpu.read(out);
     out.release();
-    // unpatchify "(h w) (p1 p2 c) -> c (h p1) (w p2)"
-    const v = new Float32Array(16 * h * w);
-    for (let y = 0; y < Hp; y++) for (let xx = 0; xx < Wp; xx++) {
-      const base = (y * Wp + xx) * 64;
-      for (let p1 = 0; p1 < 2; p1++) for (let p2 = 0; p2 < 2; p2++) for (let c = 0; c < 16; c++) {
-        v[c * h * w + (2 * y + p1) * w + (2 * xx + p2)] = o[base + p1 * 32 + p2 * 16 + c];
-      }
-    }
-    return v;
+    return unpatchify(o, h, w);
   }
 }

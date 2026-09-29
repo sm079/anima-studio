@@ -5,7 +5,7 @@
 
 const BYTES = { F32: 4, BF16: 2, F16: 2, I8: 1, U8: 1, F8_E4M3: 1 };
 
-function bf16ToF32(u8) {
+export function bf16ToF32(u8) {
   const u16 = new Uint16Array(u8.buffer, u8.byteOffset, u8.byteLength / 2);
   const out = new Float32Array(u16.length);
   const o32 = new Uint32Array(out.buffer);

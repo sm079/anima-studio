@@ -6,6 +6,7 @@ import { cachedFile, requestPersistence } from "./store.js";
 import { AnimaTokenizer } from "./prompt.js";
 import { Qwen3 } from "./models/qwen3.js";
 import { AnimaDiT } from "./models/dit.js";
+import { WebNNDiT } from "./webnn/dit.js";
 import { VAEDecoder } from "./models/vae.js";
 import { TorchGenerator } from "./rng.js";
 import { sample, SCHEDULERS } from "./samplers.js";
@@ -53,6 +54,11 @@ export function resolveFiles(manifest, { model, dit, te }) {
   return { model: m, files: { dit: m.dit[dit], te: manifest.te[te], vae: manifest.vae } };
 }
 
+// What this.loaded records for a component: the file path, tagged with the backend for the DiT
+function loadedKey(files, k, backend) {
+  return k === "dit" && backend === "webnn" ? files.dit.path + "#webnn" : files[k].path;
+}
+
 export class AnimaPipeline {
   // gpuOptions: passed to GPU.create (e.g. { profile: true } for tools/profile.html)
   constructor(gpuOptions = {}) {
@@ -65,8 +71,8 @@ export class AnimaPipeline {
     this.loraCache = new Map(); // key -> uploaded LoRA for the current model build
   }
 
-  isLoaded(files) {
-    return ["dit", "te", "vae"].every((k) => this.loaded[k] === files[k].path);
+  isLoaded(files, backend = "webgpu") {
+    return ["dit", "te", "vae"].every((k) => this.loaded[k] === loadedKey(files, k, backend));
   }
 
   // Downloads (first time only) and loads the selected files; components that are already
@@ -80,8 +86,9 @@ export class AnimaPipeline {
     const fetchJson = async (p) => (await fetch(new URL(p, baseUrl), { headers })).json();
     this.tokenizer = this.tokenizer || (await AnimaTokenizer.load(fetchJson));
     const { model, files: want } = resolveFiles(manifest, selection);
+    const backend = selection.backend === "webnn" ? "webnn" : "webgpu";
 
-    const parts = ["te", "vae", "dit"].filter((k) => this.loaded[k] !== want[k].path);
+    const parts = ["te", "vae", "dit"].filter((k) => this.loaded[k] !== loadedKey(want, k, backend));
     const total = parts.reduce((a, k) => a + want[k].size, 0);
     const got = Object.fromEntries(parts.map((k) => [k, 0]));
     const files = {};
@@ -101,9 +108,14 @@ export class AnimaPipeline {
       onStatus({ phase: "load", what: labels[k], frac: 0 });
       const progress = (f) => onStatus({ phase: "load", what: labels[k], frac: f });
       if (k === "te") this.te = await Qwen3.load(gpu, await SafeTensors.open(files.te), progress);
-      if (k === "dit") this.dit = await AnimaDiT.load(gpu, await SafeTensors.open(files.dit, "model.diffusion_model."), progress);
+      if (k === "dit" && backend === "webnn") {
+        // WebGPU keeps only the LLM adapter; WebNN runs the denoising steps
+        const st = await SafeTensors.open(files.dit, "model.diffusion_model.");
+        this.dit = await AnimaDiT.load(gpu, st, null, { adapterOnly: true });
+        this.nn = await WebNNDiT.load(st, { onProgress: progress, precision: selection.precision });
+      } else if (k === "dit") this.dit = await AnimaDiT.load(gpu, await SafeTensors.open(files.dit, "model.diffusion_model."), progress);
       if (k === "vae") this.vae = await VAEDecoder.load(gpu, await SafeTensors.open(files.vae));
-      this.loaded[k] = want[k].path;
+      this.loaded[k] = loadedKey(want, k, backend);
     }
     // LoRA matrices are laid out for a specific model build (A is rotated for quantized layers)
     if (parts.includes("te") || parts.includes("dit")) {
@@ -116,7 +128,7 @@ export class AnimaPipeline {
     }
     await gpu.sync();
     this.model = model;
-    this.selection = { ...selection };
+    this.selection = { ...selection, backend };
     onStatus({ phase: "ready" });
   }
 
@@ -129,7 +141,7 @@ export class AnimaPipeline {
 
   async applyLoras() {
     if (!this.dit || !this.te) return [];
-    const regs = { dit: linearRegistry(this.dit), te: linearRegistry(this.te) };
+    const regs = { dit: linearRegistry(this.nn ? { adapter: this.dit, nn: this.nn } : this.dit), te: linearRegistry(this.te) };
     const active = [];
     const report = [];
     for (const spec of this.loraSpec) {
@@ -159,6 +171,7 @@ export class AnimaPipeline {
     };
     if (this[k]) destroy(this[k]);
     this[k] = null;
+    if (k === "dit" && this.nn) { this.nn.dispose(); this.nn = null; }
     delete this.loaded[k];
   }
 
@@ -185,9 +198,27 @@ export class AnimaPipeline {
     const hidden = await this.te.encode(qwenIds);
     const ctx = await this.dit.adapt(hidden, t5Ids, t5Weights);
     hidden.release();
-    const cond = this.dit.prepareContext(ctx);
+    let cond;
+    if (this.nn) {
+      // the WebNN graph takes the context as an input and projects its keys/values itself
+      const data = await this.gpu.read(ctx);
+      cond = { ctx: data, Lk: ctx.shape[0], release() {} };
+      ctx.release();
+    } else cond = this.dit.prepareContext(ctx);
     this.ctxCache.set(text, cond);
     return cond;
+  }
+
+  // One denoising step on the WebNN backend (one graph dispatch). The first step at a new size,
+  // prompt length or LoRA set compiles the graph, reported as the "compile" phase.
+  async denoiseWebNN(xin, h, w, cond, sigma, i, steps, onProgress, check) {
+    check();
+    const v = await this.nn.forward(xin, h, w, cond, sigma, (f) => onProgress({ phase: "compile", frac: f, width: w * 8, height: h * 8 }));
+    check();
+    onProgress({ phase: "sample", step: i, steps, frac: (i + 1) / steps });
+    const den = new Float32Array(v.length);
+    for (let j = 0; j < v.length; j++) den[j] = xin[j] - sigma * v[j];
+    return den;
   }
 
   // Anima Turbo is distilled for CFG 1: one DiT pass per step, no negative prompt.
@@ -207,6 +238,7 @@ export class AnimaPipeline {
 
     const check = () => { if (signal?.aborted) throw new DOMException("Generation cancelled", "AbortError"); };
     const denoise = async (xin, sigma, i) => {
+      if (this.nn) return this.denoiseWebNN(xin, h, w, cond, sigma, i, steps, onProgress, check);
       const tc = this.dit.timeCond(sigma);
       const v = await this.dit.forward(xin, h, w, cond, tc, async (b) => {
         check();
