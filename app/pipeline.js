@@ -213,7 +213,7 @@ export class AnimaPipeline {
   // prompt length or LoRA set compiles the graph, reported as the "compile" phase.
   async denoiseWebNN(xin, h, w, cond, sigma, i, steps, onProgress, check) {
     check();
-    const v = await this.nn.forward(xin, h, w, cond, sigma, (f) => onProgress({ phase: "compile", frac: f }));
+    const v = await this.nn.forward(xin, h, w, cond, sigma, (f) => onProgress({ phase: "compile", frac: f, width: w * 8, height: h * 8 }));
     check();
     onProgress({ phase: "sample", step: i, steps, frac: (i + 1) / steps });
     const den = new Float32Array(v.length);

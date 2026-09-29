@@ -933,7 +933,7 @@ async function runJob(job) {
           $("progressBar").style.width = `${job.frac * 100}%`;
           $("progressText").textContent = `Step ${p.step + 1} of ${p.steps}${left}${queued()}`;
         } else if (p.phase === "compile") {
-          $("progressText").textContent = `Building the WebNN graph for this size (first image only) ${Math.round(p.frac * 100)}%…${queued()}`;
+          $("progressText").textContent = `Building the WebNN graph for ${p.width} × ${p.height} (first image at this size only) ${Math.round(p.frac * 100)}%…${queued()}`;
         } else if (p.phase === "decode") {
           job.frac = 0.92 + p.frac * 0.08;
           $("progressBar").style.width = `${job.frac * 100}%`;
