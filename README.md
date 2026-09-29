@@ -231,6 +231,65 @@ runs the complete sampling loop through the real pipeline.
 - Persistent storage: the app calls `navigator.storage.persist()` so the browser does not
   evict the cached weights.
 
+## Optional: WebNN engine (experimental)
+
+The image model can run through [WebNN](https://www.w3.org/TR/webnn/), the browser's built-in
+neural-network API, instead of the hand-written WebGPU kernels. The browser hands the whole
+diffusion step to the platform's ML stack (on Windows, Windows ML / DirectML), which can use the
+GPU's fp16 tensor cores. The WebGPU kernels compute in fp32 and can't use them. The text
+encoder, LLM adapter and VAE always stay on WebGPU. WebGPU remains the default. WebNN is opt-in.
+
+**Enable WebNN in the browser.** As of Chrome 147–149 WebNN is in an origin trial and otherwise
+behind a flag:
+
+1. Open `chrome://flags/#web-machine-learning-neural-network` (Edge:
+   `edge://flags/#web-machine-learning-neural-network`).
+2. Set **WebNN API** to **Enabled**.
+3. Relaunch the browser.
+
+(Command-line alternative: `--enable-features=WebMachineLearningNeuralNetwork`.) Then open
+**Settings → Engine** in the app and pick **WebNN (experimental)**. If WebNN isn't available,
+the option is disabled and the settings show these steps. `?backend=webnn` selects it from
+the URL.
+
+**What to expect** (RTX 4060 Laptop, Chrome/Edge 154, INT8 DiT, 768×768):
+
+| | WebGPU (default) | WebNN fp16 |
+|---|---|---|
+| one step (DiT forward) | 2.4 s | **0.85–0.95 s** |
+| first image at a new size | shaders compile once | + ~35–45 s to build the WebNN graph |
+| DiT output vs PyTorch reference (1 step) | 2.4e-5 | 8.0e-3 |
+| final latent after 8 steps | 3.5e-3 | 2.0e-1 |
+| final image vs PyTorch (same weights) | | 24.6 dB PSNR, visually the same picture |
+
+For scale: INT8 vs BF16 weights is 19.6 dB, so the WebNN rounding changes less than the
+default quantization does.
+
+- Memory: building the graph copies the weights through system RAM, and the graph needs more
+  GPU memory than the WebGPU engine (about 3 GB for the INT8 DiT at 768²). On a laptop where the
+  browser gives WebGPU the integrated GPU, a 1024² image (VAE decode in shared memory while
+  WebNN holds its graph) froze the system in testing. Prefer smaller canvases, and don't
+  use WebNN on machines that are tight on RAM or VRAM.
+
+- WebNN graphs have fixed shapes, so a graph is built per image size, prompt length (over 512
+  tokens) and LoRA set. Changing a LoRA's strength doesn't rebuild the graph, but adding or
+  removing a LoRA does. Chrome doesn't support WebNN constant tensors yet, so every rebuild
+  re-reads the weights from browser storage.
+- Numerics: linears and attention run in fp16. The residual stream, norms and adaLN stay fp32,
+  and so do the timestep and adaLN-modulation linears. They run on a single row, but their
+  outputs scale the whole residual stream. In fp16 they made the one-step error 6.7e-2
+  (fp32 attention alone didn't help: 6.6e-2).
+  With `precision=float32` (`tools/check.html?backend=webnn&precision=float32`) the same graph
+  matches the reference to 3.9e-6, which confirms the graph itself. It is ~2× slower than the
+  WebGPU engine, so it's only for checking.
+- Quantized weights stay int8 on the device (`dequantizeLinear` in the graph). W4A8 codes are
+  decoded to their int8 grid on load, so a W4A8 download uses about as much memory as INT8
+  under WebNN. BF16 weights become fp16.
+- If loading with WebNN fails, the app switches back to WebGPU and says so.
+
+Code: `app/webnn/dit.js` (graph builder and runner) and `app/webnn/support.js` (detection).
+`tools/check.html?backend=webnn&only=dit` compares one step against the reference dump.
+
 ## License
 
 The model weights are under the CircleStone Labs Non-Commercial License; see the
