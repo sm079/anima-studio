@@ -203,6 +203,10 @@ export class WebNNDiT {
     }
     m.finalMod = await mod("final_layer.", "adaln_modulation");
     m.finalLinear = await L("final_layer.linear.");
+    // The timestep MLP and adaLN modulation linears run on a single row but their outputs scale
+    // and shift the whole residual stream: fp16 matmuls there cause most of the fp16 error (one
+    // step: 6.7e-2 -> see README), so they keep fp32 weights and math.
+    for (const d of [m.t1, m.t2, ...m.finalMod, ...m.blocks.flatMap((b) => [...b.modSelf, ...b.modCross, ...b.modMlp])]) d.precise = true;
 
     // Keep the prepared weights on the device (MLTensor constants) when the browser supports it,
     // so recompiling for another resolution or LoRA set doesn't re-read and re-convert 2+ GB.
@@ -236,12 +240,12 @@ export class WebNNDiT {
   // Graph-ready weight data for a descriptor: { w, scale?, zp?, bias? }, each { desc, data }.
   // w is [K, N] (transposed so the graph does x @ w), int8 + per-column scale or float `ct`.
   async prepare(d) {
-    const ct = this.ct;
+    const ct = d.precise ? "float32" : this.ct;
     const src = [];
     for (const b of d.bases) src.push(await readLinear(this.st, b));
     const { K } = src[0];
     const N = d.N;
-    const int8 = this.caps.int8 && src.every((s) => s.quant);
+    const int8 = !d.precise && this.caps.int8 && src.every((s) => s.quant);
     const w = int8 ? new Int8Array(K * N) : new Float32Array(K * N);
     const scale = int8 ? new Float32Array(N) : null;
     let off = 0;
@@ -308,15 +312,15 @@ export class WebNNDiT {
     const loraIn = entries.length ? input("lora", [entries.length]) : null;
     const loraIdx = new Map(entries.map(({ e }, i) => [e, i]));
 
-    let had = null;
-    const hadamard = () => {
-      if (!had) {
+    const had = {};
+    const hadamard = (t) => {
+      if (!had[t]) {
         const h = new Float32Array(256 * 256);
         for (let i = 0; i < 256; i++) h[i * 256 + i] = 1;
         hadamardRows(h, 256, 256); // row i = e_i H, i.e. the matrix itself
-        had = b.constant({ dataType: ct, shape: [256, 256] }, floatData(h, ct));
+        had[t] = b.constant({ dataType: t, shape: [256, 256] }, floatData(h, t));
       }
-      return had;
+      return had[t];
     };
 
     const constOf = (t) => (t.desc ? b.constant(t.desc, t.data) : b.constant(t));
@@ -327,11 +331,12 @@ export class WebNNDiT {
       return { W, bias: w.bias ? constOf(w.bias) : null };
     };
 
-    // y = x @ W^T (+ LoRAs) (+ bias) (act), in ct
+    // y = x @ W^T (+ LoRAs) (+ bias) (act), in ct (fp32 for d.precise)
     const lin = async (x, d, act) => {
+      const ct = d.precise ? "float32" : this.ct;
       let xin = cast(x, ct);
       const [M, K] = shapeOf(xin);
-      if (d.kind !== "bf16") xin = b.reshape(b.matmul(b.reshape(xin, [(M * K) / 256, 256]), hadamard()), [M, K]);
+      if (d.kind !== "bf16") xin = b.reshape(b.matmul(b.reshape(xin, [(M * K) / 256, 256]), hadamard(ct)), [M, K]);
       const { W, bias } = await weights(d);
       let y = b.matmul(xin, W);
       for (const e of d.lora || []) {
