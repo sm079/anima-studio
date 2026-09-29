@@ -101,7 +101,7 @@ let running = null; // { ...job, abort, frac, thumb, hasPreview }
 
 const saveUi = () => store.set("ui", ui);
 const saveLoras = () => store.set("loras", loras.filter((l) => !l.pending).map(({ pending, progress, ...l }) => l));
-const fmtGB = (n) => (n >= 2 ** 30 ? `${(n / 2 ** 30).toFixed(1)} GB` : n >= 2 ** 20 ? `${(n / 2 ** 20).toFixed(n >= 100 * 2 ** 20 ? 0 : 1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+const fmtGB = (n) => (n >= 2 ** 30 ? `${(n / 2 ** 30).toFixed(1)} GB` : n >= 2 ** 20 ? `${(n / 2 ** 20).toFixed(n >= 100 * 2 ** 20 ? 0 : 1)} MB` : n > 0 ? `${Math.max(1, Math.round(n / 1024))} KB` : "0 KB");
 const fmtTime = (ms) => {
   const s = Math.max(1, Math.round(ms / 1000));
   return s >= 60 ? `${Math.floor(s / 60)} min ${s % 60 ? `${s % 60} s` : ""}`.trim() : `${s} s`;
@@ -705,7 +705,7 @@ function showWelcome(cached) {
   });
   const { files } = resolveFiles(manifest, sel);
   const need = ["dit", "te", "vae"].filter((k) => cached.get(files[k].path) !== files[k].size).reduce((a, k) => a + files[k].size, 0);
-  $("welcomeGo").textContent = `Download ${fmtGB(need)} & start`;
+  $("welcomeGo").textContent = need ? `Download ${fmtGB(need)} & start` : "Start";
   $("welcomeNote").textContent = "Downloads resume if interrupted. You can change this later in settings.";
   $("welcomeToken").value = store.get("hfToken", "");
   showTokenStatus();
@@ -1173,7 +1173,8 @@ async function openSettings(focusKey = false) {
   $("hfToken").value = store.get("hfToken", "");
   const modelBytes = [...cached.values()].reduce((a, b) => a + b, 0);
   const loraBytes = await loraStorageBytes();
-  $("storageText").textContent = modelBytes || loraBytes ? `Model files ${fmtGB(modelBytes)} · LoRAs ${fmtGB(loraBytes)}` : "Nothing downloaded yet";
+  const saved = [modelBytes && `Model files ${fmtGB(modelBytes)}`, loraBytes && `LoRAs ${fmtGB(loraBytes)}`].filter(Boolean);
+  $("storageText").textContent = saved.length ? saved.join(" · ") : "Nothing downloaded yet";
   const busy = phase === "generating" || phase === "loading";
   $("clearBtn").disabled = !modelBytes || busy;
   $("clearLorasBtn").disabled = !loraBytes || busy;
