@@ -110,7 +110,7 @@ const SCHED_INFO = {
 };
 const PRESETS = [
   { id: "best", label: "Best quality", dit: "bf16", te: "bf16", desc: "The original model." },
-  { id: "balanced", label: "Balanced", dit: "int8", te: "int8", desc: "Looks nearly identical to Best.", tag: "Recommended" },
+  { id: "balanced", label: "Balanced", dit: "int8", te: "int8", desc: "Looks nearly identical to the original model.", tag: "Recommended" },
   { id: "compact", label: "Compact", dit: "w4a8", te: "w4a8", desc: "Smallest. May read prompts a little differently." },
 ];
 const PART_LABELS = { bf16: "Original", int8: "Compressed", w4a8: "Extra compressed" };
@@ -752,7 +752,7 @@ function normalizeSelection() {
 // <option>s for every model, grouped by family
 function versionOptions() {
   const groups = Object.keys(FAMILIES).map((f) => [f, manifest.models.filter((m) => familyOf(m) === f)]).filter(([, ms]) => ms.length);
-  return groups.map(([f, ms]) => `<optgroup label="${esc(FAMILIES[f].label)}">${ms.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join("")}</optgroup>`).join("");
+  return groups.map(([f, ms]) => `<optgroup label="${esc(FAMILIES[f].label)}">${ms.map((m) => `<option value="${esc(m.id)}">${esc(shortLabel(m))}</option>`).join("")}</optgroup>`).join("");
 }
 
 function versionHelp(id) {
