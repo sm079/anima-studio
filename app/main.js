@@ -9,7 +9,7 @@ const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 // Model files live on Hugging Face, pinned to one commit: browsers cache files by name, so a new
 // upload only reaches visitors when this points at the new commit. ?models=./models/ uses a local build.
-const MODELS_URL = "https://huggingface.co/sm079/anima-studio/resolve/1abd3f6530cdb5c497e9d3e740458400b6725644/";
+const MODELS_URL = "https://huggingface.co/sm079/anima-studio/resolve/2ff1a7de73651c68c6f073380229964c1cf1e0bd/";
 const BASE = new URL(params.get("models") || MODELS_URL, location.href);
 if (!BASE.pathname.endsWith("/")) BASE.pathname += "/";
 
