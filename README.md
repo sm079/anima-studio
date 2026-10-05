@@ -15,8 +15,8 @@ WGSL kernels (`app/gpu/`) that run the quantized weights directly.
 
 - Every released version: Turbo v1.1 / v1.0 (fast, 8–12 steps), Aesthetic v1.1 / v1.0 / v1.0b
   and Base v1.0 (guidance with a negative prompt, 30–50 steps), each with its own sampler presets
-- Three download sizes (5.1 / 2.9 / 2.0 GB) from BF16, INT8 and W4A8 builds of the model and
-  text encoder, quantized offline in ComfyUI's formats
+- Two download sizes (2.9 / 2.0 GB) from INT8 and W4A8 builds of the model and text encoder,
+  quantized offline in ComfyUI's formats
 - Numerically checked against an independent PyTorch implementation, stage by stage
 - Live previews, a generation queue, seeds that match ComfyUI, and a session gallery
 - LoRAs from Hugging Face or disk, applied as a runtime low-rank path on top of quantized weights
@@ -55,8 +55,9 @@ python tools/build_assets.py          # one-time: download, quantize, pack -> mo
 | `tokenizers/` | Qwen and T5 tokenizer JSON |
 | `manifest.json` | components, file sizes, measured fidelity, sampler defaults |
 
-The diffusion model and the text encoder are built in three precisions each. Users pick
-both independently in the app, trading fidelity for download size and GPU memory:
+The diffusion model and the text encoder can be built in three precisions each. The hosted files
+are INT8 and W4A8 (BF16 is built locally as the reference for the fidelity measurements). Users
+pick both independently in the app, trading fidelity for download size and GPU memory:
 
 | precision | DiT | TE | what is quantized |
 |---|---|---|---|
@@ -100,8 +101,9 @@ same test that stopped the reinterpretation (café prompt 6.4 → 14.3 dB):
 some). Each manifest entry records the model's family (`turbo`, `aesthetic`, `base`) and its sampler
 defaults. Base v1.0 is saved with the training script's `net.` key prefix; the build renames it
 to ComfyUI's `model.diffusion_model.` like the other versions. A subset of precisions:
-`--dit int8 w4a8 --te int8`. Rerun `tools/measure_quality.py` afterwards to
-refresh the fidelity figures in the manifest.
+`--dit int8 --te int8`; the default is the hosted `int8 w4a8`. `tools/measure_quality.py`
+compares against BF16, so build that too (`--dit bf16 int8 w4a8 --te bf16 int8 w4a8`) and rerun
+it afterwards to refresh the fidelity figures in the manifest.
 
 ### Quantization formats
 

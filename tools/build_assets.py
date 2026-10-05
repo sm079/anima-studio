@@ -24,7 +24,7 @@ Every released version can be built (see VARIANTS). Turbo models are distilled f
 passes per step) and more steps. Each model's sampler defaults go into the manifest.
 
 Usage:
-  python tools/build_assets.py                                    # turbo v1.1, every precision
+  python tools/build_assets.py                                    # turbo v1.1, int8 + w4a8 (as hosted)
   python tools/build_assets.py --variants all                     # every version
   python tools/build_assets.py --variants turbo-v1.1 turbo-v1.0 --dit int8 w4a8 --te int8
   python tools/measure_quality.py                                 # then add quality scores to the manifest
@@ -181,13 +181,14 @@ def build_vae_decoder(src: str, out: str) -> None:
 
 
 QUANTS = ["bf16", "int8", "w4a8"]
+HOSTED = ["int8", "w4a8"]  # bf16 is only needed locally, as the reference for measure_quality.py
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--variants", nargs="+", default=["turbo-v1.1"], choices=[*VARIANTS, "all"])
-    ap.add_argument("--dit", nargs="+", default=QUANTS, choices=QUANTS, help="DiT precisions to build")
-    ap.add_argument("--te", nargs="+", default=QUANTS, choices=QUANTS, help="text encoder precisions to build")
+    ap.add_argument("--dit", nargs="+", default=HOSTED, choices=QUANTS, help="DiT precisions to build")
+    ap.add_argument("--te", nargs="+", default=HOSTED, choices=QUANTS, help="text encoder precisions to build")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models"))
     ap.add_argument("--src", default=None, help="directory holding already-downloaded split files")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
