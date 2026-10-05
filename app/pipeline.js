@@ -190,10 +190,11 @@ export class AnimaPipeline {
   }
 
   // Prompt -> conditioning ready for the DiT (adapter output + per-block cross-attention K/V).
-  // Only the most recent prompt is kept: the cached K/V are ~235 MB.
-  async encode(text) {
+  // Only the prompts of the current image are kept (positive and, with CFG, negative): the
+  // cached K/V are ~235 MB each.
+  async encode(text, keep = [text]) {
+    for (const [k, t] of this.ctxCache) if (!keep.includes(k)) { t.release(); this.ctxCache.delete(k); }
     if (this.ctxCache.has(text)) return this.ctxCache.get(text);
-    this.clearContexts();
     const { qwenIds, t5Ids, t5Weights } = this.tokenizer.encode(text);
     const hidden = await this.te.encode(qwenIds);
     const ctx = await this.dit.adapt(hidden, t5Ids, t5Weights);
@@ -209,26 +210,29 @@ export class AnimaPipeline {
     return cond;
   }
 
-  // One denoising step on the WebNN backend (one graph dispatch). The first step at a new size,
+  // One DiT pass on the WebNN backend (one graph dispatch). The first pass at a new size,
   // prompt length or LoRA set compiles the graph, reported as the "compile" phase.
-  async denoiseWebNN(xin, h, w, cond, sigma, i, steps, onProgress, check) {
+  async velocityWebNN(xin, h, w, cond, sigma, onProgress, check) {
     check();
     const v = await this.nn.forward(xin, h, w, cond, sigma, (f) => onProgress({ phase: "compile", frac: f, width: w * 8, height: h * 8 }));
     check();
-    onProgress({ phase: "sample", step: i, steps, frac: (i + 1) / steps });
-    const den = new Float32Array(v.length);
-    for (let j = 0; j < v.length; j++) den[j] = xin[j] - sigma * v[j];
-    return den;
+    return v;
   }
 
-  // Anima Turbo is distilled for CFG 1: one DiT pass per step, no negative prompt.
+  // Turbo models are distilled for CFG 1: one DiT pass per step, no negative prompt. Base and
+  // Aesthetic use classifier-free guidance: a second pass per step on the negative prompt,
+  // combined as uncond + cfg * (cond - uncond).
   async generate(opts) {
-    const { prompt, width, height, sampler, seed, shift = 3, scheduler = "simple", onProgress = () => {}, onPreview, signal } = opts;
+    const { prompt, negative = "", cfg = 1, width, height, sampler, seed, shift = 3, scheduler = "simple", onProgress = () => {}, onPreview, signal } = opts;
     const gpu = this.gpu;
     const h = height / 8, w = width / 8;
     const t0 = performance.now();
+    const guided = cfg !== 1;
     onProgress({ phase: "encode" });
-    const cond = await this.encode(prompt);
+    const keep = guided ? [prompt, negative] : [prompt];
+    const cond = await this.encode(prompt, keep);
+    const uncond = guided ? await this.encode(negative, keep) : null;
+    const passes = guided ? 2 : 1;
 
     const sigmas = (SCHEDULERS[scheduler] || SCHEDULERS.simple)(opts.steps, shift);
     const steps = sigmas.length - 1; // the beta scheduler can merge duplicate timesteps
@@ -237,15 +241,28 @@ export class AnimaPipeline {
     const tSample = performance.now();
 
     const check = () => { if (signal?.aborted) throw new DOMException("Generation cancelled", "AbortError"); };
-    const denoise = async (xin, sigma, i) => {
-      if (this.nn) return this.denoiseWebNN(xin, h, w, cond, sigma, i, steps, onProgress, check);
+    // velocity for one conditioning; pass p of `passes` within step i (for progress)
+    const velocity = async (xin, sigma, c, i, p) => {
+      if (this.nn) {
+        const v = await this.velocityWebNN(xin, h, w, c, sigma, onProgress, check);
+        onProgress({ phase: "sample", step: i, steps, frac: (i + (p + 1) / passes) / steps });
+        return v;
+      }
       const tc = this.dit.timeCond(sigma);
-      const v = await this.dit.forward(xin, h, w, cond, tc, async (b) => {
+      const v = await this.dit.forward(xin, h, w, c, tc, async (b) => {
         check();
-        onProgress({ phase: "sample", step: i, steps, frac: (i + (b + 1) / 28) / steps });
+        onProgress({ phase: "sample", step: i, steps, frac: (i + (p + (b + 1) / 28) / passes) / steps });
         if (b % 7 === 6) await gpu.sync(); // keep the queue short so cancel/progress stay responsive
       });
       tc.release();
+      return v;
+    };
+    const denoise = async (xin, sigma, i) => {
+      const v = await velocity(xin, sigma, cond, i, 0);
+      if (guided) {
+        const vn = await velocity(xin, sigma, uncond, i, 1);
+        for (let j = 0; j < v.length; j++) v[j] = vn[j] + cfg * (v[j] - vn[j]);
+      }
       const den = new Float32Array(v.length);
       for (let j = 0; j < v.length; j++) den[j] = xin[j] - sigma * v[j];
       return den;
@@ -271,7 +288,7 @@ export class AnimaPipeline {
     return {
       image,
       latent: x,
-      timings: { encode: tSample - t0, sample: tVae - tSample, decode: t1 - tVae, total: t1 - t0, perStep: (tVae - tSample) / steps },
+      timings: { encode: tSample - t0, sample: tVae - tSample, decode: t1 - tVae, total: t1 - t0, perStep: (tVae - tSample) / steps, perPass: (tVae - tSample) / (steps * passes) },
     };
   }
 }

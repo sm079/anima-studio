@@ -109,6 +109,12 @@ export async function listCached() {
   return out;
 }
 
+// Removes one cached file (finished or partial).
+export async function removeCached(name) {
+  const d = await dir();
+  for (const n of [name, name + ".part"]) await d.removeEntry(n).catch(() => {});
+}
+
 export async function clearCache() {
   const root = await navigator.storage.getDirectory();
   await root.removeEntry(DIR, { recursive: true });

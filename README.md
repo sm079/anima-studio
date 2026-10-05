@@ -13,6 +13,8 @@ WGSL kernels (`app/gpu/`) that run the quantized weights directly.
 
 ![Anima Studio: prompt and settings on the left, the generated image and session strip on the right](docs/screenshot.jpg)
 
+- Every released version: Turbo v1.1 / v1.0 (fast, 8–12 steps), Aesthetic v1.1 / v1.0 / v1.0b
+  and Base v1.0 (guidance with a negative prompt, 30–50 steps), each with its own sampler presets
 - Three download sizes (5.1 / 2.9 / 2.0 GB) from BF16, INT8 and W4A8 builds of the model and
   text encoder, quantized offline in ComfyUI's formats
 - Numerically checked against an independent PyTorch implementation, stage by stage
@@ -94,8 +96,10 @@ fidelity-leaning alternative keeps attention in int8 and only the MLPs in 4-bit 
 same test that stopped the reinterpretation (café prompt 6.4 → 14.3 dB):
 `python tools/build_assets.py --dit w4a8 --w4-attn int8 --force`.
 
-Only the Turbo (low-step) variants are built: `--variants turbo-v1.1 turbo-v1.0`. The app assumes
-a CFG-1 model (one DiT pass per step, no negative prompt). A subset of precisions:
+`--variants all` builds every released version (`--variants turbo-v1.1 aesthetic-v1.1 …` picks
+some). Each manifest entry records the model's family (`turbo`, `aesthetic`, `base`) and its sampler
+defaults. Base v1.0 is saved with the training script's `net.` key prefix; the build renames it
+to ComfyUI's `model.diffusion_model.` like the other versions. A subset of precisions:
 `--dit int8 w4a8 --te int8`. Rerun `tools/measure_quality.py` afterwards to
 refresh the fidelity figures in the manifest.
 
@@ -165,7 +169,7 @@ host must allow CORS and should support Range requests.
 | Text encoder | Qwen3-0.6B, 28 layers, GQA 16/8, final hidden state after the last norm |
 | LLM adapter | 6 blocks (self-attn over T5-token queries, cross-attn to Qwen3 states), output zero-padded to 512 tokens |
 | DiT | Cosmos-Predict2 MiniTrainDIT, 28 blocks, dim 2048, AdaLN-LoRA, 3D RoPE (NTK ×4 on h/w), fp32 residual stream |
-| Sampling | Flow matching, shift 3, ComfyUI "simple" and "beta" schedules (beta verified against scipy). The UI follows the community/official Turbo guidance, CFG 1 with 8–12 steps: **Detail** Fast/Better/Best = 8/10/12 steps; **Style** Crisp = ER-SDE + beta (default), Soft = Euler A, Plain = Euler. |
+| Sampling | Flow matching, shift 3, ComfyUI "simple" and "beta" schedules (beta verified against scipy). Presets per model family, from the model card. **Turbo**: CFG 1 (one DiT pass per step, no negative prompt); **Detail** Fast/Better/Best = 8/10/12 steps; **Style** Crisp = ER-SDE + beta (default), Soft = Euler A, Plain = Euler. **Aesthetic / Base**: classifier-free guidance, `uncond + cfg·(cond − uncond)`, two DiT passes per step, with an editable negative prompt (the card's recommendation; without score tags for Aesthetic); **Detail** 30/40/50 steps; **Style** Crisp = ER-SDE + simple, Soft = Euler A, Plain = Euler; CFG 4 (Aesthetic) / 4.5 (Base), half a point more for Euler A. Each family keeps its own settings when switching versions. |
 | Preview | After each step, the model's current guess of the final image is projected from the 16 latent channels to RGB with ComfyUI's fixed latent→RGB matrix (1/8 resolution, a few ms) instead of running the VAE. That's why previews are soft and colors approximate. |
 | Noise | port of `torch.randn` on the CPU generator, so seeds match ComfyUI's initial noise |
 | VAE | Wan 2.1 decoder. For one frame the causal 3D convs reduce to 2D convs (done at build time); NHWC implicit-GEMM convs with a fused 2× upsample |
@@ -221,8 +225,10 @@ runs the complete sampling loop through the real pipeline.
   or 6–7 GB for BF16, at 1024×1024. The VAE decode at large sizes is the activation peak.
 - RTX 4060 Laptop GPU, INT8, DiT forward (= one step): 768×768 **2.4 s**, 1024×1024 **5.2 s**
   (profile-guided GEMM tuning, kernel fusion and fused attention brought these down from 3.65 s
-  and 7.2 s). An 8-step Turbo image at 1024² is therefore ~44 s (8 × 5.2 s plus ~1.5 s VAE and
-  prompt encoding, in a visible tab; hidden tabs are throttled by the browser). Measured with
+  and 7.2 s). Guided models (Aesthetic, Base) run two forwards per step, so a 30-step image takes
+  60 forwards, ~5.3 min at 1024² (~2.5 min at 768²). An 8-step Turbo image at 1024² is ~44 s
+  (8 × 5.2 s plus ~1.5 s VAE and prompt encoding, in a visible tab; hidden tabs are throttled by
+  the browser). Measured with
   `tools/profile.html` (per-kernel GPU timings) and `tools/bench.html` (GEMM microbenchmark).
 - Where the time goes at 1024² (INT8): linears ~66% at ~3.9 TFLOP/s (cuBLAS f32 without tensor
   cores reaches 6.8 on this GPU), fused attention ~31% at 2.7 TFLOP/s, everything else ~3%.

@@ -411,7 +411,7 @@ def main():
             a = t.detach().float().cpu().contiguous().numpy()
             a.tofile(os.path.join(args.dump, k + ".bin"))
             index[k] = list(a.shape)
-        meta = {"prompt": args.prompt, "seed": args.seed, "width": args.width, "height": args.height, "steps": steps, "cfg": cfg,
+        meta = {"prompt": args.prompt, "negative": args.negative, "seed": args.seed, "width": args.width, "height": args.height, "steps": steps, "cfg": cfg,
                 "model": args.model, "dit": args.dit, "te": args.te, "qwen_ids": qids, "t5_ids": tids, "tensors": index,
                 "loras": [{"path": os.path.relpath(p, os.path.dirname(os.path.abspath(args.dump))).replace("\\", "/"), "strength": s} for p, s in loras]}
         json.dump(meta, open(os.path.join(args.dump, "index.json"), "w"), indent=1)

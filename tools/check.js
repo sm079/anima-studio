@@ -113,8 +113,8 @@ try {
   }
 
   if (only.includes("full")) {
-    // the whole sampling loop through the real pipeline (euler, same seed) vs the reference
-    const res = await pipe.generate({ prompt: meta.prompt, width: meta.width, height: meta.height, steps: meta.steps, sampler: "euler", seed: meta.seed });
+    // the whole sampling loop through the real pipeline (euler, same seed, same CFG) vs the reference
+    const res = await pipe.generate({ prompt: meta.prompt, negative: meta.negative ?? "", cfg: meta.cfg ?? 1, width: meta.width, height: meta.height, steps: meta.steps, sampler: "euler", seed: meta.seed });
     log(`full generate ${(res.timings.total / 1000).toFixed(1)} s (${(res.timings.perStep / 1000).toFixed(2)} s/step)`);
     compare("latent_final", res.latent, await loadDump("latent_final"), 2e-2);
   }

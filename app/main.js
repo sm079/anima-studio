@@ -1,6 +1,6 @@
 import { fetchManifest, resolveFiles } from "./pipeline.js";
 import { createEngine } from "./engine.js";
-import { listCached, clearCache, saveLoraFile, removeLoraFile, loraStorageBytes, clearLoras } from "./store.js";
+import { listCached, clearCache, removeCached, saveLoraFile, removeLoraFile, loraStorageBytes, clearLoras } from "./store.js";
 import { parseHfUrl, fetchLoraInfo, openDownload, checkToken } from "./hf.js";
 import { SafeTensors } from "./weights.js";
 import { hasWebNN, probeWebNN, WEBNN_FLAG } from "./webnn/support.js";
@@ -28,17 +28,76 @@ const SIZES = [
   { id: "medium", label: "Medium", scale: 1, tip: "About 1 megapixel, what the model was trained on" },
   { id: "large", label: "Large", scale: 1.25, tip: "About 1.5 megapixels, slowest" },
 ];
-const DETAIL = [
-  { id: "fast", label: "Fast", steps: 8, tip: "Quickest (8 steps)" },
-  { id: "better", label: "Better", steps: 10, tip: "A bit more refined (10 steps)" },
-  { id: "best", label: "Best", steps: 12, tip: "Most refined, slowest (12 steps)" },
-];
-// Sampler/scheduler pairs that suit the Turbo model at 8-12 steps.
-const STYLES = [
-  { id: "crisp", label: "Crisp", sampler: "er_sde", scheduler: "beta", tip: "Clean lines and flat colors" },
-  { id: "soft", label: "Soft", sampler: "euler_a", scheduler: "simple", tip: "Softer, thinner lines" },
-  { id: "plain", label: "Plain", sampler: "euler", scheduler: "simple", tip: "Neutral, straightforward look" },
-];
+// What the sampling controls offer for each model family. Turbo is distilled for CFG 1 at 8-12
+// steps (one DiT pass per step, no negative prompt). Base and Aesthetic need classifier-free
+// guidance with a negative prompt (two passes per step) and more steps. Values follow the model
+// card and its example workflow (30-50 steps, CFG 4-5, ER-SDE + simple; Euler A takes a little
+// more CFG).
+const FAMILIES = {
+  turbo: {
+    label: "Turbo",
+    blurb: "Fast: 8–12 steps with a strong default style. The best place to start.",
+    detail: [
+      { id: "fast", label: "Fast", steps: 8, tip: "Quickest (8 steps)" },
+      { id: "better", label: "Better", steps: 10, tip: "A bit more refined (10 steps)" },
+      { id: "best", label: "Best", steps: 12, tip: "Most refined, slowest (12 steps)" },
+    ],
+    styles: [
+      { id: "crisp", label: "Crisp", sampler: "er_sde", scheduler: "beta", tip: "Clean lines and flat colors" },
+      { id: "soft", label: "Soft", sampler: "euler_a", scheduler: "simple", tip: "Softer, thinner lines" },
+      { id: "plain", label: "Plain", sampler: "euler", scheduler: "simple", tip: "Neutral, straightforward look" },
+    ],
+    defaults: { steps: 8, sampler: "er_sde", scheduler: "beta", shift: 3, cfg: 1 },
+    stepsMax: 30,
+    stepsNote: "More steps refine the image but take longer. Turbo is tuned for 8–12.",
+    boost: "masterpiece, best quality, score_7, safe, ",
+    negative: null,
+  },
+  aesthetic: {
+    label: "Aesthetic",
+    blurb: "Polished, high-quality default style. Uses guidance and 30–50 steps, so each image takes several times longer than Turbo.",
+    detail: [
+      { id: "fast", label: "Fast", steps: 30, tip: "Quickest (30 steps)" },
+      { id: "better", label: "Better", steps: 40, tip: "More refined (40 steps)" },
+      { id: "best", label: "Best", steps: 50, tip: "Most refined, slowest (50 steps)" },
+    ],
+    styles: [
+      { id: "crisp", label: "Crisp", sampler: "er_sde", scheduler: "simple", cfg: 4, tip: "Clean lines and flat colors" },
+      { id: "soft", label: "Soft", sampler: "euler_a", scheduler: "simple", cfg: 4.5, tip: "Softer, thinner lines" },
+      { id: "plain", label: "Plain", sampler: "euler", scheduler: "simple", cfg: 4, tip: "Neutral, a little more varied" },
+    ],
+    defaults: { steps: 30, sampler: "er_sde", scheduler: "simple", shift: 3, cfg: 4 },
+    stepsMax: 60,
+    stepsNote: "More steps refine the image but take longer. This model is tuned for 30–50.",
+    // the Aesthetic versions were trained without quality tags; score tags push them too far
+    boost: "masterpiece, best quality, safe, ",
+    negative: "worst quality, low quality, artist name, blurry, jpeg artifacts, chromatic aberration",
+  },
+  base: {
+    label: "Base",
+    blurb: "The unrefined base model: most flexible and varied, with a plain default style. Works best with artist and quality tags. Several times slower than Turbo.",
+    detail: [
+      { id: "fast", label: "Fast", steps: 30, tip: "Quickest (30 steps)" },
+      { id: "better", label: "Better", steps: 40, tip: "More refined (40 steps)" },
+      { id: "best", label: "Best", steps: 50, tip: "Most refined, slowest (50 steps)" },
+    ],
+    styles: [
+      { id: "crisp", label: "Crisp", sampler: "er_sde", scheduler: "simple", cfg: 4.5, tip: "Clean lines and flat colors" },
+      { id: "soft", label: "Soft", sampler: "euler_a", scheduler: "simple", cfg: 5, tip: "Softer, thinner lines" },
+      { id: "plain", label: "Plain", sampler: "euler", scheduler: "simple", cfg: 4.5, tip: "Neutral, a little more varied" },
+    ],
+    defaults: { steps: 30, sampler: "er_sde", scheduler: "simple", shift: 3, cfg: 4.5 },
+    stepsMax: 60,
+    stepsNote: "More steps refine the image but take longer. This model is tuned for 30–50.",
+    boost: "masterpiece, best quality, score_7, safe, ",
+    negative: "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
+  },
+};
+// notes for versions that need more than the family blurb
+const MODEL_NOTES = {
+  "aesthetic-v1.0b": "Alternate v1.0: the aesthetic fine-tune alone, without the style and stabilization LoRAs merged into v1.0.",
+};
+const SAMPLING_KEYS = ["steps", "sampler", "scheduler", "shift", "cfg"];
 const SAMPLER_INFO = {
   er_sde: ["ER-SDE", "Sharp lines, flat colors (recommended)"],
   euler_a: ["Euler A", "Softer lines, a little random"],
@@ -55,7 +114,6 @@ const PRESETS = [
   { id: "compact", label: "Compact", dit: "w4a8", te: "w4a8", desc: "Smallest. May read prompts a little differently." },
 ];
 const PART_LABELS = { bf16: "Original", int8: "Compressed", w4a8: "Extra compressed" };
-const BOOST = "masterpiece, best quality, score_7, safe, ";
 const EXAMPLES = [
   "1girl, solo, silver hair, long hair, blue eyes, school uniform, cherry blossoms, petals, smile, looking at viewer, upper body",
   "1boy, knight, silver armor, holding sword, castle ruins, sunset, dramatic lighting, wind, flowing cape, wide shot",
@@ -78,10 +136,15 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem("anima-studio." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem("anima-studio." + k, JSON.stringify(v)); } catch { /* private mode */ } },
 };
+// ui holds the canvas and the current family's sampling settings; each family's settings are
+// kept in `sampling` while another family's model is loaded.
 const ui = {
-  w: 1024, h: 1024, steps: 8, sampler: "er_sde", scheduler: "beta", shift: 3,
+  w: 1024, h: 1024, ...FAMILIES.turbo.defaults, family: "turbo",
   ...store.get("ui", {}),
 };
+ui.cfg ??= 1;
+if (!FAMILIES[ui.family]) ui.family = "turbo"; // settings saved before other families existed are Turbo settings
+const sampling = store.get("sampling", {}); // family -> { steps, sampler, scheduler, shift, cfg }
 let loras = store.get("loras", []); // { id, name, version, image, page, words, file, size, strength, on }
 let manifest = null;
 let pipe = null;
@@ -103,6 +166,22 @@ const jobs = []; // waiting
 let running = null; // { ...job, abort, frac, thumb, hasPreview }
 
 const saveUi = () => store.set("ui", ui);
+const fam = () => FAMILIES[ui.family];
+const guided = (u = ui) => u.cfg !== 1;
+const modelInfo = (id) => manifest?.models.find((m) => m.id === id);
+// family from the manifest; manifests built before families existed hold Turbo models only
+const familyOf = (m) => (FAMILIES[m?.family] ? m.family : "turbo");
+const shortLabel = (m) => (m?.label || "").replace(/^Anima /, "");
+const negativeFor = (f) => store.get(`negative.${f}`, FAMILIES[f].negative || "");
+
+// Switch the sampling controls to a model family, keeping each family's own settings.
+function useFamily(f) {
+  if (ui.family === f) return;
+  sampling[ui.family] = Object.fromEntries(SAMPLING_KEYS.map((k) => [k, ui[k]]));
+  Object.assign(ui, FAMILIES[f].defaults, sampling[f], { family: f });
+  store.set("sampling", sampling);
+  saveUi();
+}
 const saveLoras = () => store.set("loras", loras.filter((l) => !l.pending).map(({ pending, progress, ...l }) => l));
 const fmtGB = (n) => (n >= 2 ** 30 ? `${(n / 2 ** 30).toFixed(1)} GB` : n >= 2 ** 20 ? `${(n / 2 ** 20).toFixed(n >= 100 * 2 ** 20 ? 0 : 1)} MB` : n > 0 ? `${Math.max(1, Math.round(n / 1024))} KB` : "0 KB");
 const fmtTime = (ms) => {
@@ -221,15 +300,18 @@ function renderControls() {
   const mp = (ui.w * ui.h) / 1e6;
   $("sizeHint").textContent = `${shape ? shape.label.split(" ")[1] : "custom"} · ${mp.toFixed(1)} MP${mp > 1.8 ? " · very large" : ""}`;
 
-  radioGroup($("detail"), DETAIL, (d) => d.steps === ui.steps, (d) => { ui.steps = d.steps; saveUi(); renderControls(); });
-  radioGroup($("style"), STYLES, (s) => s.sampler === ui.sampler && s.scheduler === ui.scheduler, (s) => {
+  const F = fam();
+  radioGroup($("detail"), F.detail, (d) => d.steps === ui.steps, (d) => { ui.steps = d.steps; saveUi(); renderControls(); });
+  radioGroup($("style"), F.styles, (s) => s.sampler === ui.sampler && s.scheduler === ui.scheduler, (s) => {
     ui.sampler = s.sampler;
     ui.scheduler = s.scheduler;
+    if (s.cfg) ui.cfg = s.cfg;
     saveUi();
     renderControls();
   });
   renderChips();
   renderGo();
+  if (fam().negative) $("negHint").textContent = guided() ? "" : "· off at guidance 1";
 }
 
 function renderChips() {
@@ -242,6 +324,7 @@ function renderChips() {
     ["scheduler", `<b>${SCHED_INFO[ui.scheduler][0]}</b> schedule`],
     ["shift", `shift <b>${ui.shift}</b>`],
   ];
+  if (fam().negative) chips.push(["cfg", `guidance <b>${ui.cfg}</b>`]);
   for (const [key, html] of chips) {
     const b = document.createElement("button");
     b.type = "button";
@@ -290,8 +373,12 @@ function openPopover(key, anchor) {
   };
   if (key === "steps") {
     title.textContent = "Steps";
-    note.textContent = "More steps refine the image but take longer. This model is tuned for 8–12.";
-    pop.append(title, range(1, 30, 1, ui.steps, (v) => { ui.steps = v; saveUi(); renderControls(); }), note);
+    note.textContent = fam().stepsNote;
+    pop.append(title, range(1, fam().stepsMax, 1, ui.steps, (v) => { ui.steps = v; saveUi(); renderControls(); }), note);
+  } else if (key === "cfg") {
+    title.textContent = "Guidance (CFG)";
+    note.textContent = `How closely the image follows the prompt and steers away from the negative prompt. Too high burns colors and details. Default ${fam().defaults.cfg}. 1 turns guidance off: twice as fast, but the negative prompt is ignored.`;
+    pop.append(title, range(1, 8, 0.5, ui.cfg, (v) => { ui.cfg = v; saveUi(); renderControls(); }), note);
   } else if (key === "shift") {
     title.textContent = "Shift";
     note.textContent = "Higher values spend more effort on the overall layout, lower on fine detail. Default 3.";
@@ -325,14 +412,15 @@ function closePopover() {
   for (const c of $("advChips").children) c.setAttribute("aria-expanded", "false");
 }
 
-// per-step time measured on this device, scaled by pixel count for other sizes
-function estimateMs(w = ui.w, h = ui.h, steps = ui.steps) {
+// per-pass time measured on this device, scaled by pixel count for other sizes (guided models
+// run two DiT passes per step)
+function estimateMs(w = ui.w, h = ui.h, passes = ui.steps * (guided() ? 2 : 1)) {
   const px = w * h;
   const runs = store.get("speed", []);
   if (!runs.length) return null;
   const ref = runs.reduce((a, r) => (Math.abs(Math.log(r.px / px)) < Math.abs(Math.log(a.px / px)) ? r : a));
   const loraFactor = loras.some((l) => l.on) ? 1.15 : 1;
-  return ref.step * (px / ref.px) ** 1.2 * steps * loraFactor + ref.decode * (px / ref.px);
+  return ref.step * (px / ref.px) ** 1.2 * passes * loraFactor + ref.decode * (px / ref.px);
 }
 
 function renderGo() {
@@ -350,6 +438,20 @@ function setRandom(on) {
   $("randomBtn").setAttribute("aria-pressed", String(on));
   $("randomBtn").title = on ? "A new random seed for every image (click to keep the seed)" : "Keeping this seed (click for a new random seed every image)";
   store.set("randomSeed", on);
+}
+
+// The negative prompt box is shown for models that use guidance; each family keeps its own text.
+function renderNegative() {
+  const on = !!fam().negative;
+  $("negGroup").hidden = !on;
+  if (!on) return;
+  $("negative").value = negativeFor(ui.family);
+  $("negHint").textContent = guided() ? "" : "· off at guidance 1";
+}
+
+function setNegative(text) {
+  $("negative").value = text;
+  store.set(`negative.${ui.family}`, text);
 }
 
 function setBoost(on) {
@@ -644,6 +746,18 @@ function normalizeSelection() {
   const pick = (avail, want) => (avail.includes(want) ? want : ["int8", "w4a8", "bf16"].find((p) => avail.includes(p)) || avail[0]);
   sel = { model: m.id, dit: pick(Object.keys(m.dit), sel?.dit ?? "int8"), te: pick(Object.keys(manifest.te), sel?.te ?? "int8") };
   store.set("selection", sel);
+  useFamily(familyOf(m));
+}
+
+// <option>s for every model, grouped by family
+function versionOptions() {
+  const groups = Object.keys(FAMILIES).map((f) => [f, manifest.models.filter((m) => familyOf(m) === f)]).filter(([, ms]) => ms.length);
+  return groups.map(([f, ms]) => `<optgroup label="${esc(FAMILIES[f].label)}">${ms.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join("")}</optgroup>`).join("");
+}
+
+function versionHelp(id) {
+  const m = modelInfo(id);
+  return [FAMILIES[familyOf(m)].blurb, MODEL_NOTES[id]].filter(Boolean).join(" ");
 }
 
 function presetBytes(p) {
@@ -680,7 +794,8 @@ function renderPresets(el, cached, onPick) {
 
 function chipText() {
   const p = currentPreset();
-  $("gpuChip").textContent = (p ? p.label : "Custom") + (backend === "webnn" ? " · WebNN" : "");
+  const model = manifest.models.length > 1 ? `${shortLabel(modelInfo(sel.model))} · ` : "";
+  $("gpuChip").textContent = model + (p ? p.label : "Custom") + (backend === "webnn" ? " · WebNN" : "");
   $("gpuChip").hidden = false;
 }
 
@@ -701,6 +816,10 @@ function showWelcome(cached) {
   renderGo();
   setStatus("Choose a download to get started");
   $("welcome").querySelector("h1").textContent = cached.size === 0 ? "Make anime art on your own device" : "Download this version";
+  $("welcomeVersionField").hidden = manifest.models.length < 2;
+  $("welcomeVersion").innerHTML = versionOptions();
+  $("welcomeVersion").value = sel.model;
+  $("welcomeVersionHelp").textContent = versionHelp(sel.model);
   renderPresets($("welcomePresets"), cached, (p) => {
     sel = { ...sel, dit: p.dit, te: p.te };
     store.set("selection", sel);
@@ -865,11 +984,13 @@ function enqueue() {
   const base = Math.min(2 ** 32 - 1, Math.max(0, Math.floor(Number($("seed").value) || 0)));
   const text = $("prompt").value.trim();
   const boost = pressed("boostBtn");
+  const negative = guided() ? $("negative").value.trim() : "";
+  const model = sel.model;
   const loraSnap = loras.filter((l) => l.on && !l.pending && loraReport.get(l.file)?.matched !== 0).map((l) => ({ id: l.id, name: l.name, file: l.file, strength: l.strength }));
   for (let k = 0; k < n; k++) {
     // random mode: a fresh seed per image; fixed seed + batch: consecutive seeds
     const seed = random ? newSeed() : (base + k) >>> 0;
-    jobs.push({ text, boost, ui: { ...ui }, seed, loras: loraSnap });
+    jobs.push({ text, boost, negative, model, ui: { ...ui }, seed, loras: loraSnap });
     if (k === 0 || random) $("seed").value = seed;
   }
   store.set("seed", $("seed").value);
@@ -905,7 +1026,8 @@ async function runQueue() {
 }
 
 async function runJob(job) {
-  const { w: width, h: height, steps, sampler, scheduler, shift } = job.ui;
+  const { w: width, h: height, steps, sampler, scheduler, shift, cfg } = job.ui;
+  const prefix = FAMILIES[job.ui.family].boost;
   $("errorCard").hidden = true;
   $("progress").hidden = !live;
   $("progressBar").style.width = "0%";
@@ -920,7 +1042,8 @@ async function runJob(job) {
   try {
     await syncLoras(job.loras.map((l) => ({ file: l.file, strength: l.strength })));
     const res = await pipe.generate({
-      prompt: job.boost && !/^masterpiece/i.test(job.text) ? BOOST + job.text : job.text,
+      prompt: job.boost && !/^masterpiece/i.test(job.text) ? prefix + job.text : job.text,
+      negative: job.negative, cfg,
       width, height, steps, sampler, scheduler, shift, seed: job.seed,
       signal: job.abort.signal,
       onPreview: (img) => onPreview(job, img),
@@ -945,10 +1068,10 @@ async function runJob(job) {
     if (live) draw(res.image);
     if (!backgrounded && !job.loras.length && backend === "webgpu") {
       const runs = store.get("speed", []).filter((r) => r.px !== width * height);
-      runs.push({ px: width * height, step: res.timings.perStep, decode: res.timings.decode + res.timings.encode });
+      runs.push({ px: width * height, step: res.timings.perPass, decode: res.timings.decode + res.timings.encode });
       store.set("speed", runs.slice(-6));
     }
-    const record = { text: job.text, boost: job.boost, ui: job.ui, seed: job.seed, loras: job.loras };
+    const record = { text: job.text, boost: job.boost, negative: job.negative, model: job.model, ui: job.ui, seed: job.seed, loras: job.loras };
     await addToGallery(res.image, record, { ...res.timings, total: performance.now() - t0, backgrounded, width, height }, live);
   } catch (e) {
     if (e.name !== "AbortError") {
@@ -1026,7 +1149,9 @@ function metaLine(parts, note) {
 }
 
 function settingsBits(r, w, h) {
-  const bits = [`<b>${w} × ${h}</b>`, `${r.ui.steps} steps`, esc(SAMPLER_INFO[r.ui.sampler][0]), `seed ${r.seed}`];
+  const bits = [esc(shortLabel(modelInfo(r.model))), `<b>${w} × ${h}</b>`, `${r.ui.steps} steps`, esc(SAMPLER_INFO[r.ui.sampler][0])].filter(Boolean);
+  if (guided(r.ui)) bits.push(`CFG ${r.ui.cfg}`);
+  bits.push(`seed ${r.seed}`);
   if (r.loras.length) bits.push(r.loras.length === 1 ? `LoRA: ${esc(r.loras[0].name)}` : `${r.loras.length} LoRAs`);
   return bits;
 }
@@ -1059,8 +1184,10 @@ function renderInfo() {
     $("prompt").value = r.text;
     store.set("prompt", r.text);
     setBoost(r.boost);
-    Object.assign(ui, r.ui);
+    // sampling settings only carry over to a model of the same family
+    Object.assign(ui, r.ui.family === ui.family ? r.ui : { w: r.ui.w, h: r.ui.h });
     saveUi();
+    if (r.negative && r.ui.family === ui.family) setNegative(r.negative);
     $("seed").value = r.seed;
     store.set("seed", String(r.seed));
     setRandom(false);
@@ -1169,8 +1296,9 @@ async function openSettings(focusKey = false) {
   const cached = await cachedMap();
   const models = manifest.models;
   $("versionField").hidden = models.length < 2;
-  $("version").innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join("");
+  $("version").innerHTML = versionOptions();
   $("version").value = sel.model;
+  $("versionHelp").textContent = versionHelp(sel.model);
   renderPresets($("presets"), cached, (p) => {
     $("settings").close();
     changeSelection({ dit: p.dit, te: p.te });
@@ -1189,11 +1317,23 @@ async function openSettings(focusKey = false) {
   $("storageText").textContent = saved.length ? saved.join(" · ") : "Nothing downloaded yet";
   const busy = phase === "generating" || phase === "loading";
   $("clearBtn").disabled = !modelBytes || busy;
+  const others = otherVersionFiles(cached);
+  const otherBytes = others.reduce((a, n) => a + cached.get(n), 0);
+  $("clearOthersBtn").hidden = !others.length;
+  $("clearOthersBtn").textContent = `Remove other versions (${fmtGB(otherBytes)})`;
+  $("clearOthersBtn").disabled = busy;
   $("clearLorasBtn").disabled = !loraBytes || busy;
   for (const el of [$("version"), $("ditSel"), $("teSel"), $("backendSel"), ...$("presets").querySelectorAll("button")]) el.disabled = busy;
   renderBackend();
   $("settings").showModal();
   if (focusKey) $("hfToken").focus();
+}
+
+// Cached image-model files of versions and sizes other than the selected one
+function otherVersionFiles(cached) {
+  const keep = resolveFiles(manifest, sel).files.dit.path;
+  const dits = new Set(manifest.models.flatMap((m) => Object.values(m.dit).map((f) => f.path)));
+  return [...cached.keys()].filter((n) => n !== keep && dits.has(n));
 }
 
 // ------------------------------------------------------------------ optional WebNN engine
@@ -1232,6 +1372,8 @@ function changeSelection(patch) {
   sel = { ...sel, ...patch };
   normalizeSelection();
   chipText();
+  renderControls();
+  renderNegative();
   ensureModel();
 }
 
@@ -1258,6 +1400,9 @@ async function init() {
   $("prompt").value = store.get("prompt", EXAMPLES[0]);
   $("prompt").oninput = () => store.set("prompt", $("prompt").value);
   setBoost(store.get("boost", true));
+  $("negative").oninput = () => store.set(`negative.${ui.family}`, $("negative").value);
+  $("negReset").onclick = () => setNegative(FAMILIES[ui.family].negative || "");
+  renderNegative();
   $("boostBtn").onclick = () => setBoost(!pressed("boostBtn"));
   $("exampleBtn").onclick = () => {
     exampleIdx = (exampleIdx + 1) % EXAMPLES.length;
@@ -1327,6 +1472,7 @@ async function init() {
   $("welcomeGo").onclick = loadModel;
   $("loadingCancel").onclick = () => loadAbort?.abort();
   $("version").onchange = () => { $("settings").close(); changeSelection({ model: $("version").value }); };
+  $("welcomeVersion").onchange = () => changeSelection({ model: $("welcomeVersion").value });
   $("ditSel").onchange = () => { $("settings").close(); changeSelection({ dit: $("ditSel").value }); };
   $("teSel").onchange = () => { $("settings").close(); changeSelection({ te: $("teSel").value }); };
   $("backendSel").onchange = () => {
@@ -1340,6 +1486,12 @@ async function init() {
     const show = $("hfToken").type === "password";
     $("hfToken").type = show ? "text" : "password";
     $("keyToggle").textContent = show ? "Hide" : "Show";
+  };
+  $("clearOthersBtn").onclick = async () => {
+    const others = otherVersionFiles(await cachedMap());
+    if (!confirm(`Remove ${others.length === 1 ? "1 downloaded image model" : `${others.length} downloaded image models`} you're not using right now? The current one stays.`)) return;
+    for (const n of others) await removeCached(n);
+    $("settings").close();
   };
   $("clearLorasBtn").onclick = async () => {
     if (!confirm("Remove all downloaded LoRAs from this browser?")) return;

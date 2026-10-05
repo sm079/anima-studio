@@ -19,11 +19,13 @@ Precisions:
   Quantized text encoders keep their last layer bf16 (the most sensitive one) and store the
   embedding table as per-row int8.
 
-Only the Turbo (low-step, CFG 1) variants are built: the app runs one DiT pass per step and
-has no negative prompt.
+Every released version can be built (see VARIANTS). Turbo models are distilled for CFG 1 and
+8-12 steps; Base and Aesthetic use classifier-free guidance with a negative prompt (two DiT
+passes per step) and more steps. Each model's sampler defaults go into the manifest.
 
 Usage:
   python tools/build_assets.py                                    # turbo v1.1, every precision
+  python tools/build_assets.py --variants all                     # every version
   python tools/build_assets.py --variants turbo-v1.1 turbo-v1.0 --dit int8 w4a8 --te int8
   python tools/measure_quality.py                                 # then add quality scores to the manifest
 """
@@ -47,9 +49,16 @@ import quant  # noqa: E402
 REPO = "circlestone-labs/Anima"
 TOKENIZER_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 
+# Released versions, in the order the app lists them. family: turbo (distilled, CFG 1) |
+# aesthetic | base (CFG with a negative prompt). Defaults follow the model card and its example
+# workflow.
 VARIANTS = {
-    "turbo-v1.1": {"file": "anima-turbo-v1.1.safetensors", "label": "Anima Turbo v1.1", "steps": 8, "cfg": 1.0, "sampler": "er_sde", "scheduler": "beta"},
-    "turbo-v1.0": {"file": "anima-turbo-v1.0.safetensors", "label": "Anima Turbo v1.0", "steps": 8, "cfg": 1.0, "sampler": "er_sde", "scheduler": "beta"},
+    "turbo-v1.1": {"file": "anima-turbo-v1.1.safetensors", "label": "Anima Turbo v1.1", "family": "turbo", "steps": 8, "cfg": 1.0, "sampler": "er_sde", "scheduler": "beta"},
+    "turbo-v1.0": {"file": "anima-turbo-v1.0.safetensors", "label": "Anima Turbo v1.0", "family": "turbo", "steps": 8, "cfg": 1.0, "sampler": "er_sde", "scheduler": "beta"},
+    "aesthetic-v1.1": {"file": "anima-aesthetic-v1.1.safetensors", "label": "Anima Aesthetic v1.1", "family": "aesthetic", "steps": 30, "cfg": 4.0, "sampler": "er_sde", "scheduler": "simple"},
+    "aesthetic-v1.0": {"file": "anima-aesthetic-v1.0.safetensors", "label": "Anima Aesthetic v1.0", "family": "aesthetic", "steps": 30, "cfg": 4.0, "sampler": "er_sde", "scheduler": "simple"},
+    "aesthetic-v1.0b": {"file": "anima-aesthetic-v1.0b.safetensors", "label": "Anima Aesthetic v1.0b", "family": "aesthetic", "steps": 30, "cfg": 4.0, "sampler": "er_sde", "scheduler": "simple"},
+    "base-v1.0": {"file": "anima-base-v1.0.safetensors", "label": "Anima Base v1.0", "family": "base", "steps": 30, "cfg": 4.5, "sampler": "er_sde", "scheduler": "simple"},
 }
 
 DIT_PREFIX = "model.diffusion_model."
@@ -74,20 +83,34 @@ def fmt_size(n: int) -> str:
     return f"{n / 2**30:.2f} GiB" if n > 2**30 else f"{n / 2**20:.1f} MiB"
 
 
+# Base v1.0 is saved with the training script's "net." prefix instead of ComfyUI's
+SRC_PREFIXES = ("net.",)
+
+
 def build_dit(src: str, out: str, mode: str, device: str, w4_attn: bool = True) -> None:
-    if mode == "bf16":
+    with safe_open(src, "pt") as f:
+        src_keys = list(f.keys())
+    # source key -> key in the web asset (always DIT_PREFIX + ...)
+    rename = {}
+    for k in src_keys:
+        p = next((p for p in SRC_PREFIXES if k.startswith(p)), None)
+        rename[k] = DIT_PREFIX + k[len(p):] if p else k
+    if mode == "bf16" and all(rename[k] == k for k in src_keys):
         shutil.copyfile(src, out)
         return
     tensors: dict[str, torch.Tensor] = {}
     n_blocks = 0
     with safe_open(src, "pt") as f:
-        keys = list(f.keys())
-        for k in keys:
-            m = re.match(re.escape(DIT_PREFIX) + r"blocks\.(\d+)\.", k)
+        for k in src_keys:
+            m = re.match(re.escape(DIT_PREFIX) + r"blocks\.(\d+)\.", rename[k])
             if m:
                 n_blocks = max(n_blocks, int(m.group(1)) + 1)
-        for i, k in enumerate(keys):
-            t = f.get_tensor(k)
+        for i, sk in enumerate(src_keys):
+            t = f.get_tensor(sk)
+            k = rename[sk]
+            if mode == "bf16":
+                tensors[k] = t
+                continue
             m = DIT_QUANT_RE.search(k)
             if m and quant.can_convrot(t):
                 block = int(m.group(1))
@@ -100,7 +123,7 @@ def build_dit(src: str, out: str, mode: str, device: str, w4_attn: bool = True) 
             else:
                 tensors[k] = t.to(torch.bfloat16) if t.is_floating_point() else t
             if i % 50 == 0:
-                print(f"  dit {mode}: {i}/{len(keys)}", flush=True)
+                print(f"  dit {mode}: {i}/{len(src_keys)}", flush=True)
     save_file(tensors, out, metadata={"format": "pt", "anima_web": "dit", "quant": mode})
 
 
@@ -162,7 +185,7 @@ QUANTS = ["bf16", "int8", "w4a8"]
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--variants", nargs="+", default=["turbo-v1.1"], choices=list(VARIANTS))
+    ap.add_argument("--variants", nargs="+", default=["turbo-v1.1"], choices=[*VARIANTS, "all"])
     ap.add_argument("--dit", nargs="+", default=QUANTS, choices=QUANTS, help="DiT precisions to build")
     ap.add_argument("--te", nargs="+", default=QUANTS, choices=QUANTS, help="text encoder precisions to build")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models"))
@@ -173,6 +196,8 @@ def main() -> None:
                     help="attention linears in the w4a8 DiT: w4 (reference mixed scheme, 1.54 GiB) or int8 "
                          "(4-bit MLPs only, 1.86 GiB; fewer prompt reinterpretations)")
     args = ap.parse_args()
+    if "all" in args.variants:
+        args.variants = list(VARIANTS)
 
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
@@ -222,7 +247,7 @@ def main() -> None:
         if model is None:
             model = {"id": variant, "dit": {}}
             manifest["models"].append(model)
-        model.update({"label": v["label"], "defaults": {"steps": v["steps"], "cfg": v["cfg"], "sampler": v["sampler"], "scheduler": v["scheduler"], "shift": 3.0}})
+        model.update({"label": v["label"], "family": v["family"], "defaults": {"steps": v["steps"], "cfg": v["cfg"], "sampler": v["sampler"], "scheduler": v["scheduler"], "shift": 3.0}})
         src = None
         for mode in args.dit:
             name = f"anima-{variant}.{mode}.safetensors"
@@ -234,7 +259,8 @@ def main() -> None:
             model["dit"][mode] = {**model["dit"].get(mode, {}), **entry(name)}
             print(f"  {name}: {fmt_size(os.path.getsize(path))}")
 
-    manifest["models"].sort(key=lambda m: m["id"])
+    order = list(VARIANTS)
+    manifest["models"].sort(key=lambda m: order.index(m["id"]) if m["id"] in order else len(order))
     json.dump(manifest, open(manifest_path, "w"), indent=2)
     print("wrote", manifest_path)
 
