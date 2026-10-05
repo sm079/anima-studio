@@ -41,6 +41,15 @@
         <textarea id="prompt" spellcheck="false" placeholder="e.g. 1girl, silver hair, school uniform, cherry blossoms, smile"></textarea>
       </section>
 
+      <!-- negative prompt: only for models that use guidance (Base, Aesthetic) -->
+      <section class="group" id="negGroup" hidden>
+        <div class="label-row">
+          <label for="negative" class="label">Avoid <span class="hint" id="negHint"></span></label>
+          <button class="link" id="negReset" type="button" title="Restore the recommended negative prompt for this model">Reset</button>
+        </div>
+        <textarea id="negative" class="neg" spellcheck="false" placeholder="Things to keep out of the image"></textarea>
+      </section>
+
       <!-- LoRAs: one compact row; the list lives in its own view -->
       <button class="lora-entry" id="loraEntry" type="button" aria-label="LoRAs, open the list">
         <span class="label">LoRAs</span>
@@ -126,6 +135,11 @@
       <div class="panel-center" id="welcome" hidden>
         <h1>Make anime art on your own device</h1>
         <p class="lead">Anima runs entirely in this browser. Your prompts and images never leave your computer. Pick a download to get started. It's saved, so you only download it once.</p>
+        <label class="field welcome-version" id="welcomeVersionField" hidden>
+          <span class="label">Model version</span>
+          <select id="welcomeVersion"></select>
+          <span class="help" id="welcomeVersionHelp"></span>
+        </label>
         <div class="presets" id="welcomePresets"></div>
         <div class="welcome-token">
           <label class="label" for="welcomeToken">Hugging Face token <em>optional</em></label>
@@ -206,6 +220,7 @@
     <label class="field" id="versionField" hidden>
       <span class="label">Model version</span>
       <select id="version"></select>
+      <span class="help" id="versionHelp"></span>
     </label>
     <span class="label">Download size &amp; quality</span>
     <div class="presets" id="presets"></div>
@@ -236,6 +251,7 @@
     <div class="storage">
       <div><span class="label">Saved in this browser</span><p class="help" id="storageText"></p></div>
       <div class="storage-actions">
+        <button class="ghost" type="button" id="clearOthersBtn" hidden>Remove other versions</button>
         <button class="ghost" type="button" id="clearLorasBtn">Remove LoRAs</button>
         <button class="ghost danger" type="button" id="clearBtn">Remove model</button>
       </div>
