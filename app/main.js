@@ -4,6 +4,7 @@ import { listCached, clearCache, removeCached, saveLoraFile, removeLoraFile, lor
 import { parseHfUrl, fetchLoraInfo, openDownload, checkToken } from "./hf.js";
 import { SafeTensors } from "./weights.js";
 import { hasWebNN, probeWebNN, WEBNN_FLAG } from "./webnn/support.js";
+import { writeMeta, readDropped, isImageDrop } from "./pngmeta.js";
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -1096,19 +1097,25 @@ function renderGpuChip() {
   $("gpuChip").title = `${g.name || "Graphics card"}${g.peak ? ` · up to ${fmtGB(g.peak)} of working memory used` : ""}`;
 }
 
-function toBlobURL(img) {
+// Saved images carry their settings, so dropping one on the prompt box restores them.
+const META_KEY = "anima-studio";
+
+async function toBlobURL(img, record) {
   const c = document.createElement("canvas");
   c.width = img.width;
   c.height = img.height;
   c.getContext("2d").putImageData(new ImageData(img.data, img.width, img.height), 0, 0);
-  return new Promise((r) => c.toBlob((b) => r(URL.createObjectURL(b)), "image/png"));
+  const png = await new Promise((r) => c.toBlob(r, "image/png"));
+  const { text, boost, negative, model, ui: u, seed } = record;
+  const meta = { text, boost, negative, model, ui: u, seed, loras: record.loras.map(({ id, name, strength }) => ({ id, name, strength })) };
+  return URL.createObjectURL(await writeMeta(png, META_KEY, meta));
 }
 
 // Finished images live as PNG blobs (not raw pixels), so a long session stays light on memory.
 const GALLERY_MAX = 100;
 
 async function addToGallery(img, record, timings, follow) {
-  const url = await toBlobURL(img);
+  const url = await toBlobURL(img, record);
   const item = { url, width: img.width, height: img.height, record, timings };
   gallery.unshift(item);
   if (gallery.length > GALLERY_MAX) {
@@ -1156,6 +1163,43 @@ function settingsBits(r, w, h) {
   return bits;
 }
 
+// Restore an image's prompt, settings, seed and LoRA strengths (from the gallery or a dropped PNG).
+function applyRecord(r) {
+  $("prompt").value = r.text;
+  store.set("prompt", r.text);
+  setBoost(r.boost);
+  // sampling settings only carry over to a model of the same family
+  Object.assign(ui, r.ui.family === ui.family ? r.ui : { w: r.ui.w, h: r.ui.h });
+  saveUi();
+  if (r.negative && r.ui.family === ui.family) setNegative(r.negative);
+  $("seed").value = r.seed;
+  store.set("seed", String(r.seed));
+  setRandom(false);
+  for (const l of loras) {
+    const m = r.loras.find((x) => x.id === l.id);
+    l.on = !!m;
+    if (m) l.strength = m.strength;
+  }
+  saveLoras();
+  renderLoras();
+  renderControls();
+}
+
+// Settings read from a dropped image, checked against what this app offers; null if they don't fit.
+function droppedRecord(m) {
+  const u = m?.ui;
+  const num = (v, lo, hi) => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
+  const F = FAMILIES[u?.family];
+  if (!F || typeof m.text !== "string" || !num(u.w, 256, 1536) || !num(u.h, 256, 1536) || !Number.isInteger(u.steps) || !num(u.steps, 1, F.stepsMax)
+    || !SAMPLER_INFO[u.sampler] || !SCHED_INFO[u.scheduler] || !num(u.shift, 1, 6) || !num(u.cfg, 1, 8) || !Number.isInteger(m.seed) || !num(m.seed, 0, 2 ** 32 - 1)) return null;
+  const loraList = Array.isArray(m.loras) ? m.loras.filter((l) => typeof l?.id === "string" && num(l.strength, -1, 2)) : [];
+  return {
+    text: m.text, boost: !!m.boost, negative: typeof m.negative === "string" ? m.negative : "", seed: m.seed,
+    ui: { family: u.family, w: round16(u.w), h: round16(u.h), steps: u.steps, sampler: u.sampler, scheduler: u.scheduler, shift: u.shift, cfg: u.cfg },
+    loras: loraList.map(({ id, strength }) => ({ id, strength })),
+  };
+}
+
 function renderInfo() {
   const el = $("info");
   el.innerHTML = "";
@@ -1180,26 +1224,7 @@ function renderInfo() {
   reuse.type = "button";
   reuse.innerHTML = `${ICONS.reuse}<span>Use these settings</span>`;
   reuse.title = "Restore this image's prompt, settings, seed and LoRA strengths";
-  reuse.onclick = () => {
-    $("prompt").value = r.text;
-    store.set("prompt", r.text);
-    setBoost(r.boost);
-    // sampling settings only carry over to a model of the same family
-    Object.assign(ui, r.ui.family === ui.family ? r.ui : { w: r.ui.w, h: r.ui.h });
-    saveUi();
-    if (r.negative && r.ui.family === ui.family) setNegative(r.negative);
-    $("seed").value = r.seed;
-    store.set("seed", String(r.seed));
-    setRandom(false);
-    for (const l of loras) {
-      const m = r.loras.find((x) => x.id === l.id);
-      l.on = !!m;
-      if (m) l.strength = m.strength;
-    }
-    saveLoras();
-    renderLoras();
-    renderControls();
-  };
+  reuse.onclick = () => applyRecord(r);
   actions.append(dl, reuse);
   el.append(m, actions);
 }
@@ -1399,6 +1424,14 @@ async function init() {
   // prompt
   $("prompt").value = store.get("prompt", EXAMPLES[0]);
   $("prompt").oninput = () => store.set("prompt", $("prompt").value);
+  // an image saved from this app, dropped on the prompt, brings back its settings
+  $("prompt").addEventListener("dragover", (e) => { if (e.dataTransfer.types.includes("Files")) e.preventDefault(); });
+  $("prompt").addEventListener("drop", async (e) => {
+    if (!isImageDrop(e.dataTransfer)) return; // plain text drops as usual
+    e.preventDefault();
+    const r = droppedRecord(await readDropped(e.dataTransfer, META_KEY));
+    if (r) applyRecord(r);
+  });
   setBoost(store.get("boost", true));
   $("negative").oninput = () => store.set(`negative.${ui.family}`, $("negative").value);
   $("negReset").onclick = () => setNegative(FAMILIES[ui.family].negative || "");
