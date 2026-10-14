@@ -300,6 +300,8 @@ Code: `app/webnn/dit.js` (graph builder and runner) and `app/webnn/support.js` (
 
 ## License
 
+The code is MIT-licensed; see [LICENSE](LICENSE).
+
 The model weights are under the CircleStone Labs Non-Commercial License; see the
 [model card](https://huggingface.co/circlestone-labs/Anima). Generated images may be used
 commercially according to the model card. The converted weights the app downloads
